@@ -1,0 +1,108 @@
+<Window x:Class="RvcVoiceChanger.Views.BootstrapWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="RVC Voice Changer — первый запуск"
+        Height="660" Width="820"
+        MinHeight="480" MinWidth="680"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource Bg}" Foreground="{DynamicResource Fg}"
+        ResizeMode="CanResize">
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Style="{StaticResource H1}" Text="Установка компонентов" />
+
+        <TextBlock Grid.Row="1" Style="{StaticResource Hint}" Margin="0,0,0,14"
+                   Text="При первом запуске программа скачает portable Python 3.11, PyTorch, RVC-бэкенд и модели извлечения высоты тона (примерно 3–6 ГБ). Если интернет медленный, а на компьютере уже стоит Python 3.11 с torch — нажмите «Взять пакеты с диска» и тяжёлое качать не придётся." />
+
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+                <GroupBox Header="Прокси (если провайдер блокирует сайты зависимостей)">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="Режим:" Width="110" />
+                            <ComboBox x:Name="ProxyMode" Width="160" SelectionChanged="ProxyMode_Changed">
+                                <ComboBoxItem Content="Без прокси" />
+                                <ComboBoxItem Content="HTTP" />
+                                <ComboBoxItem Content="SOCKS5" />
+                            </ComboBox>
+                        </StackPanel>
+
+                        <Grid x:Name="ProxyFields" Margin="0,10,0,0" IsEnabled="False">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="110" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="80" />
+                                <ColumnDefinition Width="110" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Адрес:" />
+                            <TextBox   Grid.Row="0" Grid.Column="1" x:Name="ProxyHost" Margin="0,0,8,6" />
+                            <TextBlock Grid.Row="0" Grid.Column="2" Text="Порт:" />
+                            <TextBox   Grid.Row="0" Grid.Column="3" x:Name="ProxyPort" Margin="0,0,0,6" />
+
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Логин:" />
+                            <TextBox   Grid.Row="1" Grid.Column="1" x:Name="ProxyUser" Margin="0,0,8,6" />
+                            <TextBlock Grid.Row="1" Grid.Column="2" Text="Пароль:" />
+                            <PasswordBox Grid.Row="1" Grid.Column="3" x:Name="ProxyPass" Margin="0,0,0,6" />
+
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Зеркало PyPI:" />
+                            <TextBox   Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3" x:Name="PipIndex"
+                                       IsEnabled="True"
+                                       ToolTip="Например: https://pypi.org/simple или зеркало вашего провайдера" />
+                        </Grid>
+
+                        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                            <CheckBox x:Name="ProxyForPip" Content="Использовать для pip / PyTorch" IsChecked="True" Margin="0,0,20,0" />
+                            <CheckBox x:Name="ProxyForHf" Content="Использовать для HuggingFace" IsChecked="True" />
+                        </StackPanel>
+
+                        <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                            <Button Content="Проверить соединение" Click="TestProxy_Click" />
+                            <TextBlock x:Name="ProxyStatus" Foreground="{DynamicResource Muted}" />
+                        </StackPanel>
+                    </StackPanel>
+                </GroupBox>
+
+                <GroupBox Header="Журнал установки">
+                    <StackPanel>
+                        <TextBox x:Name="InstallLog" MinHeight="160" MaxHeight="260" IsReadOnly="True"
+                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                                 TextWrapping="NoWrap"
+                                 FontFamily="Consolas" FontSize="12" Background="{DynamicResource ConsoleBg}" Foreground="{DynamicResource ConsoleFg}" />
+
+                        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                            <Button Content="Открыть папку логов" Click="OpenInstallLog_Click" />
+                            <Button Content="Копировать журнал" Click="CopyInstallLog_Click" />
+                            <TextBlock x:Name="LogPathText" Style="{StaticResource Hint}" Margin="8,0,0,0" />
+                        </StackPanel>
+                    </StackPanel>
+                </GroupBox>
+            </StackPanel>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="3" Margin="0,12,0,8">
+            <TextBlock x:Name="StageText" Text="Готов к установке" />
+            <ProgressBar x:Name="Progress" Height="8" Margin="0,8,0,0" Minimum="0" Maximum="100"
+                         Foreground="{DynamicResource Accent}" Background="{DynamicResource Bg3}" BorderThickness="0" />
+        </StackPanel>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="LocalEnvButton" Content="Взять пакеты с диска" Click="LocalEnv_Click"
+                    ToolTip="Скопировать torch и прочие пакеты из другого Python вместо скачивания" />
+            <Button x:Name="CancelButton" Content="Закрыть" Click="Cancel_Click" />
+            <Button x:Name="StartButton" Content="Начать установку" Style="{StaticResource AccentButton}" Click="Start_Click" />
+        </StackPanel>
+    </Grid>
+</Window>

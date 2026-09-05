@@ -1,0 +1,71 @@
+<UserControl x:Class="RvcVoiceChanger.Views.ModelsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{DynamicResource Bg}" Foreground="{DynamicResource Fg}">
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Style="{StaticResource H1}" Text="Модели" />
+
+        <GroupBox Grid.Row="1" Header="Ручное добавление">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="130" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Имя модели:" />
+                <TextBox   Grid.Row="0" Grid.Column="1" x:Name="NameBox" Margin="0,0,8,8" />
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Файл .pth:" />
+                <TextBox   Grid.Row="1" Grid.Column="1" x:Name="PthBox" Margin="0,0,8,8" IsReadOnly="True" />
+                <Button    Grid.Row="1" Grid.Column="2" Content="Выбрать..." Click="BrowsePth_Click" Margin="0,0,0,8" />
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Файл .index:" />
+                <TextBox   Grid.Row="2" Grid.Column="1" x:Name="IndexBox" Margin="0,0,8,8" IsReadOnly="True" />
+                <Button    Grid.Row="2" Grid.Column="2" Content="Выбрать..." Click="BrowseIndex_Click" Margin="0,0,0,8" />
+
+                <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal">
+                    <Button Content="Добавить модель" Style="{StaticResource AccentButton}" Click="Add_Click" />
+                    <Button Content="Добавить из ZIP-архива" Click="AddZip_Click" />
+                    <TextBlock x:Name="AddStatus" Foreground="{DynamicResource Muted}" />
+                </StackPanel>
+            </Grid>
+        </GroupBox>
+
+        <Border Grid.Row="2" Background="{DynamicResource CardBg}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="10">
+            <ListView x:Name="ModelList" Background="Transparent" BorderThickness="0"
+                      Foreground="{DynamicResource Fg}" MouseDoubleClick="ModelList_DoubleClick">
+                <ListView.View>
+                    <GridView>
+                        <GridViewColumn Header="Название" Width="260" DisplayMemberBinding="{Binding Name}" />
+                        <GridViewColumn Header="Состояние" Width="170" DisplayMemberBinding="{Binding StatusText}" />
+                        <GridViewColumn Header="Размер" Width="90" DisplayMemberBinding="{Binding SizeText}" />
+                        <GridViewColumn Header="Источник" Width="260" DisplayMemberBinding="{Binding Source}" />
+                        <GridViewColumn Header="Добавлена" Width="140" DisplayMemberBinding="{Binding AddedAt}" />
+                    </GridView>
+                </ListView.View>
+            </ListView>
+        </Border>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,12,0,0">
+            <Button Content="Переименовать" Click="Rename_Click" />
+            <Button Content="Открыть папку" Click="OpenFolder_Click" />
+            <Button Content="Удалить из списка" Click="Remove_Click" />
+            <Button Content="Удалить вместе с файлами" Click="Delete_Click" />
+            <Button Content="Обновить" Click="Refresh_Click" />
+        </StackPanel>
+    </Grid>
+</UserControl>

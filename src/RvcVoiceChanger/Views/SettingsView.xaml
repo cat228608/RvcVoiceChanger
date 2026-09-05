@@ -1,0 +1,202 @@
+<UserControl x:Class="RvcVoiceChanger.Views.SettingsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{DynamicResource Bg}" Foreground="{DynamicResource Fg}">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="24">
+            <TextBlock Style="{StaticResource H1}" Text="Настройки" />
+
+            <GroupBox Header="Качество преобразования">
+                <StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Алгоритм высоты тона:" Width="250" />
+                        <ComboBox x:Name="F0Method" Width="200" SelectionChanged="Any_Changed">
+                            <ComboBoxItem Content="rmvpe" />
+                            <ComboBoxItem Content="crepe" />
+                            <ComboBoxItem Content="crepe-tiny" />
+                            <ComboBoxItem Content="fcpe" />
+                        </ComboBox>
+                        <TextBlock Style="{StaticResource Hint}" Margin="12,0,0,0"
+                                   Text="rmvpe — лучший баланс; fcpe — быстрее на слабом железе" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Модель эмбеддера:" Width="250" />
+                        <ComboBox x:Name="Embedder" Width="200" SelectionChanged="Any_Changed">
+                            <ComboBoxItem Content="contentvec" />
+                            <ComboBoxItem Content="chinese-hubert-base" />
+                            <ComboBoxItem Content="japanese-hubert-base" />
+                            <ComboBoxItem Content="korean-hubert-base" />
+                            <ComboBoxItem Content="custom" />
+                        </ComboBox>
+                        <TextBox x:Name="EmbedderCustom" Width="260" Margin="12,0,0,0"
+                                 ToolTip="Путь к папке со своим эмбеддером" LostFocus="Any_Changed" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Влияние индекса (index rate):" Width="250" />
+                        <Slider x:Name="IndexRate" Width="300" Minimum="0" Maximum="1" ValueChanged="Slider_Changed" />
+                        <TextBlock x:Name="IndexRateText" Width="60" Margin="12,0,0,0" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Защита глухих согласных:" Width="250" />
+                        <Slider x:Name="Protect" Width="300" Minimum="0" Maximum="0.5" ValueChanged="Slider_Changed" />
+                        <TextBlock x:Name="ProtectText" Width="60" Margin="12,0,0,0" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Огибающая громкости:" Width="250" />
+                        <Slider x:Name="VolumeEnvelope" Width="300" Minimum="0" Maximum="1" ValueChanged="Slider_Changed" />
+                        <TextBlock x:Name="VolumeEnvelopeText" Width="60" Margin="12,0,0,0" />
+                    </StackPanel>
+                </StackPanel>
+            </GroupBox>
+
+            <GroupBox Header="Автотюн и высота тона">
+                <StackPanel>
+                    <CheckBox x:Name="Autotune" Content="Автотюн (подтягивать ноты к чистому строю)" Checked="Any_Changed" Unchecked="Any_Changed" />
+
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Сила автотюна:" Width="250" />
+                        <Slider x:Name="AutotuneStrength" Width="300" Minimum="0" Maximum="1" ValueChanged="Slider_Changed" />
+                        <TextBlock x:Name="AutotuneStrengthText" Width="60" Margin="12,0,0,0" />
+                    </StackPanel>
+
+                    <CheckBox x:Name="ProposedPitch" Content="Предполагаемая высота тона (автоподбор сдвига под голос)"
+                              Checked="Any_Changed" Unchecked="Any_Changed" />
+
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Порог предполагаемой высоты (Гц):" Width="250" />
+                        <Slider x:Name="ProposedPitchThreshold" Width="300" Minimum="50" Maximum="1200" ValueChanged="Slider_Changed" />
+                        <TextBlock x:Name="ProposedPitchThresholdText" Width="60" Margin="12,0,0,0" />
+                    </StackPanel>
+
+                    <TextBlock Style="{StaticResource Hint}"
+                               Text="155 Гц — мужской голос, 255 Гц — женский. Порог помогает автоматике понять ваш тип голоса." />
+                </StackPanel>
+            </GroupBox>
+
+            <GroupBox Header="Очистка и постобработка">
+                <StackPanel>
+                    <CheckBox x:Name="CleanAudio" Content="Очистка аудио (подавление шума)" Checked="Any_Changed" Unchecked="Any_Changed" />
+
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Сила очистки:" Width="250" />
+                        <Slider x:Name="CleanStrength" Width="300" Minimum="0" Maximum="1" ValueChanged="Slider_Changed" />
+                        <TextBlock x:Name="CleanStrengthText" Width="60" Margin="12,0,0,0" />
+                    </StackPanel>
+
+                    <CheckBox x:Name="PostProcess" Content="Постобработка (эффекты)" Checked="Any_Changed" Unchecked="Any_Changed" />
+
+                    <StackPanel Margin="20,0,0,0">
+                        <CheckBox x:Name="Reverb" Content="Реверберация" Checked="Any_Changed" Unchecked="Any_Changed" />
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="Размер комнаты / wet:" Width="230" />
+                            <Slider x:Name="ReverbRoom" Width="140" Minimum="0" Maximum="1" ValueChanged="Slider_Changed" />
+                            <Slider x:Name="ReverbWet" Width="140" Minimum="0" Maximum="1" Margin="10,0,0,0" ValueChanged="Slider_Changed" />
+                        </StackPanel>
+
+                        <CheckBox x:Name="Compressor" Content="Компрессор" Checked="Any_Changed" Unchecked="Any_Changed" />
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="Порог (дБ) / степень:" Width="230" />
+                            <Slider x:Name="CompThreshold" Width="140" Minimum="-60" Maximum="0" ValueChanged="Slider_Changed" />
+                            <Slider x:Name="CompRatio" Width="140" Minimum="1" Maximum="20" Margin="10,0,0,0" ValueChanged="Slider_Changed" />
+                        </StackPanel>
+
+                        <CheckBox x:Name="Limiter" Content="Лимитер (защита от перегруза)" Checked="Any_Changed" Unchecked="Any_Changed" />
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="Порог лимитера (дБ):" Width="230" />
+                            <Slider x:Name="LimiterThreshold" Width="290" Minimum="-30" Maximum="0" ValueChanged="Slider_Changed" />
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </GroupBox>
+
+            <GroupBox Header="Задержка и поток">
+                <StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Размер чанка:" Width="250" />
+                        <Slider x:Name="ChunkSize" Width="300" Minimum="16" Maximum="256" TickFrequency="16"
+                                IsSnapToTickEnabled="True" ValueChanged="Slider_Changed" />
+                        <TextBlock x:Name="ChunkSizeText" Width="140" Margin="12,0,0,0" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Перекрытие кроссфейда (с):" Width="250" />
+                        <Slider x:Name="CrossFade" Width="300" Minimum="0.02" Maximum="0.3" ValueChanged="Slider_Changed" />
+                        <TextBlock x:Name="CrossFadeText" Width="80" Margin="12,0,0,0" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Размер доп. преобразования (с):" Width="250" />
+                        <Slider x:Name="ExtraConvert" Width="300" Minimum="0.1" Maximum="3" ValueChanged="Slider_Changed" />
+                        <TextBlock x:Name="ExtraConvertText" Width="80" Margin="12,0,0,0" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Порог тишины (дБ):" Width="250" />
+                        <Slider x:Name="SilentThreshold" Width="300" Minimum="-90" Maximum="-20" ValueChanged="Slider_Changed" />
+                        <TextBlock x:Name="SilentThresholdText" Width="80" Margin="12,0,0,0" />
+                    </StackPanel>
+
+                    <CheckBox x:Name="UsePhaseVocoder" Content="Фазовый вокодер (мягче стыки блоков)" Checked="Any_Changed" Unchecked="Any_Changed" />
+                    <CheckBox x:Name="VadEnabled" Content="VAD (обрабатывать только речь)" Checked="Any_Changed" Unchecked="Any_Changed" />
+                    <CheckBox x:Name="ExclusiveMode" Content="Эксклюзивный режим WASAPI (меньше задержка, но занимает устройство)"
+                              Checked="Any_Changed" Unchecked="Any_Changed" />
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Вычисления:" Width="250" />
+                        <ComboBox x:Name="DeviceBox" Width="200" SelectionChanged="Any_Changed">
+                            <ComboBoxItem Content="Автовыбор" />
+                            <ComboBoxItem Content="NVIDIA CUDA" />
+                            <ComboBoxItem Content="CPU" />
+                        </ComboBox>
+                    </StackPanel>
+                </StackPanel>
+            </GroupBox>
+
+            <GroupBox Header="Сеть и прокси">
+                <StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Режим:" Width="250" />
+                        <ComboBox x:Name="ProxyModeBox" Width="160" SelectionChanged="Any_Changed">
+                            <ComboBoxItem Content="Без прокси" />
+                            <ComboBoxItem Content="HTTP" />
+                            <ComboBoxItem Content="SOCKS5" />
+                        </ComboBox>
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Адрес : порт:" Width="250" />
+                        <TextBox x:Name="ProxyHost" Width="220" LostFocus="Any_Changed" />
+                        <TextBox x:Name="ProxyPort" Width="80" Margin="8,0,0,0" LostFocus="Any_Changed" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Логин / пароль:" Width="250" />
+                        <TextBox x:Name="ProxyUser" Width="150" LostFocus="Any_Changed" />
+                        <PasswordBox x:Name="ProxyPass" Width="150" Margin="8,0,0,0" LostFocus="Any_Changed" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <CheckBox x:Name="ProxyForPip" Content="Для pip / PyTorch" Margin="0,0,20,0" Checked="Any_Changed" Unchecked="Any_Changed" />
+                        <CheckBox x:Name="ProxyForHf" Content="Для HuggingFace" Checked="Any_Changed" Unchecked="Any_Changed" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <Button Content="Проверить соединение" Click="TestProxy_Click" />
+                        <TextBlock x:Name="ProxyStatus" Foreground="{DynamicResource Muted}" />
+                    </StackPanel>
+                </StackPanel>
+            </GroupBox>
+
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,20">
+                <Button Content="Применить к запущенному движку" Style="{StaticResource AccentButton}" Click="Apply_Click" />
+                <Button Content="Сбросить к значениям по умолчанию" Click="Reset_Click" />
+                <Button Content="Открыть папку данных" Click="OpenData_Click" />
+                <TextBlock x:Name="SaveStatus" Foreground="{DynamicResource Muted}" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

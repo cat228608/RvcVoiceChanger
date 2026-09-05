@@ -1,0 +1,84 @@
+<UserControl x:Class="RvcVoiceChanger.Views.ParserView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{DynamicResource Bg}" Foreground="{DynamicResource Fg}">
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Style="{StaticResource H1}" Text="Парсер моделей с HuggingFace" />
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,12">
+            <Button x:Name="ParseButton" Content="Парсить модели" Style="{StaticResource AccentButton}" Click="Parse_Click" />
+            <TextBox x:Name="SearchBox" Width="240" Margin="8,0,8,0" ToolTip="Поиск по названию репозитория (необязательно)" />
+            <TextBlock x:Name="ParseStatus" Foreground="{DynamicResource Muted}" />
+        </StackPanel>
+
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="400" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0" Background="{DynamicResource CardBg}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="10" Margin="0,0,12,0">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="Авторы (по 10 на страницу)" Margin="12,10,0,6"
+                               Foreground="{DynamicResource Muted}" />
+                    <ListBox x:Name="RepoList" Background="Transparent" BorderThickness="0"
+                             Foreground="{DynamicResource Fg}" SelectionChanged="Repo_Changed">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="6,6">
+                                    <TextBlock Text="{Binding RepoId}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding Summary}" Foreground="{DynamicResource Muted}" FontSize="11" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </DockPanel>
+            </Border>
+
+            <Border Grid.Column="1" Background="{DynamicResource CardBg}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="10">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" x:Name="FilesHeader" Text="Файлы моделей" Margin="12,10,0,6"
+                               Foreground="{DynamicResource Muted}" />
+                    <ListView x:Name="FileList" Background="Transparent" BorderThickness="0"
+                              Foreground="{DynamicResource Fg}" MouseDoubleClick="Download_Click">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Header="Модель" Width="330" DisplayMemberBinding="{Binding Title}" />
+                                <GridViewColumn Header="Тип" Width="110" DisplayMemberBinding="{Binding KindText}" />
+                                <GridViewColumn Header="Размер" Width="140" DisplayMemberBinding="{Binding SizeText}" />
+                            </GridView>
+                        </ListView.View>
+                    </ListView>
+                </DockPanel>
+            </Border>
+        </Grid>
+
+        <StackPanel Grid.Row="3" Margin="0,12,0,0">
+            <TextBlock x:Name="DownloadStatus" Foreground="{DynamicResource Muted}" />
+            <ProgressBar x:Name="DownloadProgress" Height="8" Margin="0,6,0,0" Minimum="0" Maximum="100"
+                         Foreground="{DynamicResource Accent}" Background="{DynamicResource Bg3}" BorderThickness="0" />
+        </StackPanel>
+
+        <Grid Grid.Row="4" Margin="0,12,0,0">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                <Button x:Name="DownloadButton" Content="Скачать и установить" Style="{StaticResource AccentButton}"
+                        Click="Download_Click" IsEnabled="False" />
+                <Button Content="Открыть репозиторий" Click="OpenRepo_Click" />
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="PrevButton" Content="&lt;&lt; Назад" Click="Prev_Click" IsEnabled="False" />
+                <TextBlock x:Name="PageText" Text="Страница 1" Margin="8,0,8,0" />
+                <Button x:Name="NextButton" Content="Вперёд &gt;&gt;" Click="Next_Click" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</UserControl>

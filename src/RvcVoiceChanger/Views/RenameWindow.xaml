@@ -1,0 +1,31 @@
+<Window x:Class="RvcVoiceChanger.Views.RenameWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Имя модели"
+        SizeToContent="Height"
+        Width="460" MinWidth="420" MinHeight="200"
+        WindowStartupLocation="CenterOwner" ResizeMode="CanResize"
+        ShowInTaskbar="False"
+        Background="{DynamicResource Bg}" Foreground="{DynamicResource Fg}">
+    <!-- SizeToContent="Height": высота считается по содержимому, поэтому кнопки не обрезаются
+         при крупном системном шрифте и масштабе 125–150 %. -->
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Введите своё название модели:"
+                   TextWrapping="Wrap" Margin="0,0,0,10" />
+
+        <TextBox Grid.Row="1" x:Name="Input" MinHeight="30" VerticalContentAlignment="Center" />
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right"
+                    Margin="0,18,0,0">
+            <Button Content="Отмена" MinWidth="104" Click="Cancel_Click" IsCancel="True" />
+            <Button Content="Сохранить" MinWidth="114" Margin="0"
+                    Style="{StaticResource AccentButton}" Click="Ok_Click" IsDefault="True" />
+        </StackPanel>
+    </Grid>
+</Window>

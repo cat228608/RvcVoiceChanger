@@ -1,0 +1,48 @@
+<UserControl x:Class="RvcVoiceChanger.Views.LogsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{DynamicResource Bg}" Foreground="{DynamicResource Fg}">
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Style="{StaticResource H1}" Text="Логи" />
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,12">
+            <TextBlock Text="Уровень:" Margin="0,0,8,0" />
+            <ComboBox x:Name="LevelFilter" Width="150" SelectedIndex="1" SelectionChanged="Filter_Changed">
+                <ComboBoxItem Content="Всё (Trace)" />
+                <ComboBoxItem Content="Отладка и выше" />
+                <ComboBoxItem Content="Сведения и выше" />
+                <ComboBoxItem Content="Предупреждения и выше" />
+                <ComboBoxItem Content="Только ошибки" />
+            </ComboBox>
+
+            <TextBox x:Name="SearchBox" Width="240" Margin="16,0,8,0" TextChanged="Filter_Changed"
+                     ToolTip="Поиск по тексту" />
+
+            <CheckBox x:Name="AutoScroll" Content="Автопрокрутка" IsChecked="True" Margin="8,0,16,0" />
+
+            <Button Content="Открыть папку логов" Click="OpenFolder_Click" />
+            <Button Content="Копировать всё" Click="Copy_Click" />
+            <Button Content="Очистить экран" Click="Clear_Click" />
+        </StackPanel>
+
+        <Border Grid.Row="2" Background="{DynamicResource ConsoleBg}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="10">
+            <ListView x:Name="LogList" Background="Transparent" BorderThickness="0" Foreground="{DynamicResource Fg}"
+                      FontFamily="Consolas" FontSize="12" ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                <ListView.View>
+                    <GridView>
+                        <GridViewColumn Header="Время" Width="90" DisplayMemberBinding="{Binding TimeText}" />
+                        <GridViewColumn Header="Уровень" Width="80" DisplayMemberBinding="{Binding LevelText}" />
+                        <GridViewColumn Header="Источник" Width="110" DisplayMemberBinding="{Binding Source}" />
+                        <GridViewColumn Header="Сообщение" Width="720" DisplayMemberBinding="{Binding Message}" />
+                    </GridView>
+                </ListView.View>
+            </ListView>
+        </Border>
+    </Grid>
+</UserControl>

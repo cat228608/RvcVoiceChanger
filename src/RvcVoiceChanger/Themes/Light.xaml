@@ -1,0 +1,25 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- Светлая тема -->
+    <SolidColorBrush x:Key="Bg" Color="#F4F6FA" />
+    <SolidColorBrush x:Key="Bg2" Color="#EBEEF5" />
+    <SolidColorBrush x:Key="Bg3" Color="#E2E6EF" />
+    <SolidColorBrush x:Key="BgHover" Color="#DBE0EC" />
+    <SolidColorBrush x:Key="CardBg" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="InputBg" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="Border" Color="#D5DAE6" />
+    <SolidColorBrush x:Key="SelBg" Color="#D6E2FB" />
+    <SolidColorBrush x:Key="Fg" Color="#1C2230" />
+    <SolidColorBrush x:Key="Muted" Color="#66708A" />
+    <SolidColorBrush x:Key="Accent" Color="#3E6DE0" />
+    <SolidColorBrush x:Key="AccentHover" Color="#5580E8" />
+    <SolidColorBrush x:Key="AccentPressed" Color="#3159C4" />
+    <SolidColorBrush x:Key="AccentFg" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="Ok" Color="#1F9D61" />
+    <SolidColorBrush x:Key="Warn" Color="#B07E13" />
+    <SolidColorBrush x:Key="Err" Color="#D64545" />
+    <SolidColorBrush x:Key="ConsoleBg" Color="#EEF1F7" />
+    <SolidColorBrush x:Key="ConsoleFg" Color="#2A3348" />
+    <SolidColorBrush x:Key="ScrollThumb" Color="#C3CAD9" />
+    <SolidColorBrush x:Key="ScrollThumbHover" Color="#A9B2C6" />
+</ResourceDictionary>
