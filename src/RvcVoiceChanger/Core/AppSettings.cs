@@ -37,6 +37,8 @@ public sealed class AppSettings : INotifyPropertyChanged
     private string _vbCableUrl = "";
     private string _hfSearchFilter = "rvc";
     private int _hfPageSize = 10;
+    private string _parserSource = "huggingface";
+    private string _voiceModelsEndpoint = "";
 
     private int _settingsVersion;
 
@@ -138,6 +140,16 @@ public sealed class AppSettings : INotifyPropertyChanged
 
     /// <summary>Размер страницы поиска моделей.</summary>
     public int HfPageSize { get => _hfPageSize; set => Set(ref _hfPageSize, value == 0 ? 10 : Math.Clamp(value, 1, 100)); }
+
+    /// <summary>Выбранный сервис в парсере: "huggingface" или "voice-models".</summary>
+    public string ParserSource
+    {
+        get => _parserSource;
+        set => Set(ref _parserSource, string.IsNullOrWhiteSpace(value) ? "huggingface" : value.Trim());
+    }
+
+    /// <summary>Адрес voice-models.com (пусто = https://voice-models.com, можно указать зеркало).</summary>
+    public string VoiceModelsEndpoint { get => _voiceModelsEndpoint; set => Set(ref _voiceModelsEndpoint, value); }
 
     // ---------- Аудиоустройства ----------
     private string? _inputDeviceId;

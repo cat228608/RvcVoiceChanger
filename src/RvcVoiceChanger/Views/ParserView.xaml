@@ -11,31 +11,60 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="0" Style="{StaticResource H1}" Text="Парсер моделей с HuggingFace" />
+        <TextBlock Grid.Row="0" Style="{StaticResource H1}" Text="Парсер моделей" />
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,12">
+            <TextBlock Text="Сервис:" VerticalAlignment="Center" Margin="0,0,6,0"
+                       Foreground="{DynamicResource Muted}" />
+            <ComboBox x:Name="SourceBox" Width="180" Margin="0,0,8,0"
+                      SelectionChanged="Source_Changed"
+                      ToolTip="Откуда брать модели" />
             <Button x:Name="ParseButton" Content="Парсить модели" Style="{StaticResource AccentButton}" Click="Parse_Click" />
-            <TextBox x:Name="SearchBox" Width="240" Margin="8,0,8,0" ToolTip="Поиск по названию репозитория (необязательно)" />
-            <TextBlock x:Name="ParseStatus" Foreground="{DynamicResource Muted}" />
+            <!-- Поле поиска с полупрозрачной подсказкой: без неё непонятно, зачем это поле. -->
+            <Grid Width="240" Margin="8,0,8,0">
+                <TextBox x:Name="SearchBox" KeyDown="Search_KeyDown"
+                         ToolTip="Поиск по названию" />
+                <TextBlock Text="Искать" IsHitTestVisible="False"
+                           Margin="11,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center"
+                           Foreground="{DynamicResource Muted}" Opacity="0.65">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Text, ElementName=SearchBox}" Value="">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+            </Grid>
+            <TextBlock x:Name="ParseStatus" Foreground="{DynamicResource Muted}" VerticalAlignment="Center" />
         </StackPanel>
 
         <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="400" />
+                <ColumnDefinition Width="340" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
             <Border Grid.Column="0" Background="{DynamicResource CardBg}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="10" Margin="0,0,12,0">
                 <DockPanel>
-                    <TextBlock DockPanel.Dock="Top" Text="Авторы (по 10 на страницу)" Margin="12,10,0,6"
+                    <TextBlock DockPanel.Dock="Top" x:Name="GroupsHeader" Text="Авторы" Margin="12,10,0,6"
                                Foreground="{DynamicResource Muted}" />
                     <ListBox x:Name="RepoList" Background="Transparent" BorderThickness="0"
-                             Foreground="{DynamicResource Fg}" SelectionChanged="Repo_Changed">
+                             Foreground="{DynamicResource Fg}" SelectionChanged="Repo_Changed"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            </Style>
+                        </ListBox.ItemContainerStyle>
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <StackPanel Margin="6,6">
-                                    <TextBlock Text="{Binding RepoId}" FontWeight="SemiBold" />
-                                    <TextBlock Text="{Binding Summary}" Foreground="{DynamicResource Muted}" FontSize="11" />
+                                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                    <TextBlock Text="{Binding Summary}" Foreground="{DynamicResource Muted}" FontSize="11" TextWrapping="Wrap" />
                                 </StackPanel>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
@@ -51,9 +80,9 @@
                               Foreground="{DynamicResource Fg}" MouseDoubleClick="Download_Click">
                         <ListView.View>
                             <GridView>
-                                <GridViewColumn Header="Модель" Width="330" DisplayMemberBinding="{Binding Title}" />
-                                <GridViewColumn Header="Тип" Width="110" DisplayMemberBinding="{Binding KindText}" />
-                                <GridViewColumn Header="Размер" Width="140" DisplayMemberBinding="{Binding SizeText}" />
+                                <GridViewColumn Header="Модель" Width="300" DisplayMemberBinding="{Binding Title}" />
+                                <GridViewColumn Header="Тип" Width="130" DisplayMemberBinding="{Binding KindText}" />
+                                <GridViewColumn Header="Размер" Width="110" DisplayMemberBinding="{Binding SizeText}" />
                             </GridView>
                         </ListView.View>
                     </ListView>
@@ -71,12 +100,12 @@
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
                 <Button x:Name="DownloadButton" Content="Скачать и установить" Style="{StaticResource AccentButton}"
                         Click="Download_Click" IsEnabled="False" />
-                <Button Content="Открыть репозиторий" Click="OpenRepo_Click" />
+                <Button x:Name="OpenButton" Content="Открыть репозиторий" Click="OpenRepo_Click" />
             </StackPanel>
 
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button x:Name="PrevButton" Content="&lt;&lt; Назад" Click="Prev_Click" IsEnabled="False" />
-                <TextBlock x:Name="PageText" Text="Страница 1" Margin="8,0,8,0" />
+                <TextBlock x:Name="PageText" Text="Страница 1" Margin="8,0,8,0" VerticalAlignment="Center" />
                 <Button x:Name="NextButton" Content="Вперёд &gt;&gt;" Click="Next_Click" />
             </StackPanel>
         </Grid>

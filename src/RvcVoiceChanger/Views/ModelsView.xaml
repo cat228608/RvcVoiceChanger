@@ -50,11 +50,11 @@
                       Foreground="{DynamicResource Fg}" MouseDoubleClick="ModelList_DoubleClick">
                 <ListView.View>
                     <GridView>
-                        <GridViewColumn Header="Название" Width="260" DisplayMemberBinding="{Binding Name}" />
-                        <GridViewColumn Header="Состояние" Width="170" DisplayMemberBinding="{Binding StatusText}" />
+                        <GridViewColumn Header="Название" Width="240" DisplayMemberBinding="{Binding Name}" />
+                        <GridViewColumn Header="Состояние" Width="160" DisplayMemberBinding="{Binding StatusText}" />
                         <GridViewColumn Header="Размер" Width="90" DisplayMemberBinding="{Binding SizeText}" />
-                        <GridViewColumn Header="Источник" Width="260" DisplayMemberBinding="{Binding Source}" />
-                        <GridViewColumn Header="Добавлена" Width="140" DisplayMemberBinding="{Binding AddedAt}" />
+                        <GridViewColumn Header="Источник" Width="230" DisplayMemberBinding="{Binding Source}" />
+                        <GridViewColumn Header="Добавлена" Width="130" DisplayMemberBinding="{Binding AddedAt}" />
                     </GridView>
                 </ListView.View>
             </ListView>

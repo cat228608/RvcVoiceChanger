@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text.RegularExpressions;
@@ -132,7 +133,32 @@ public static class HttpFactory
             isHf = string.Equals(host, mirror.Host, StringComparison.OrdinalIgnoreCase);
         }
 
+        // Сайты-каталоги моделей и файлообменники, куда ведут их ссылки, ходят
+        // по той же галочке, что HuggingFace: это трафик парсера моделей.
+        if (!isHf && IsParserHost(s, host)) return s.ProxyForHuggingFace;
+
         return isHf ? s.ProxyForHuggingFace : s.ProxyForPip;
+    }
+
+    private static readonly string[] ParserHosts =
+    {
+        "voice-models.com", "easyaivoice.com", "drive.google.com", "docs.google.com",
+        "drive.usercontent.google.com", "googleusercontent.com", "pixeldrain.com",
+        "cdn.discordapp.com", "media.discordapp.net", "mega.nz", "mega.co.nz",
+        "mediafire.com", "dropbox.com", "workupload.com", "krakenfiles.com", "gofile.io"
+    };
+
+    /// <summary>Хосты, с которых парсер моделей забирает страницы и файлы.</summary>
+    private static bool IsParserHost(AppSettings s, string host)
+    {
+        if (host.Length == 0) return false;
+
+        if (ParserHosts.Any(h => host == h || host.EndsWith("." + h, StringComparison.Ordinal)))
+            return true;
+
+        return !string.IsNullOrWhiteSpace(s.VoiceModelsEndpoint) &&
+               Uri.TryCreate(s.VoiceModelsEndpoint, UriKind.Absolute, out var custom) &&
+               string.Equals(host, custom.Host, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ProxySignature(AppSettings s) =>

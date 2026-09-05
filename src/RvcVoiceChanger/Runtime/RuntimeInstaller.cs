@@ -55,7 +55,7 @@ public sealed class RuntimeInstaller
     private const string PySocksWheelUrl = "https://files.pythonhosted.org/packages/8d/59/b4572118e098ac8e46e399a1dd0f2d85403ce8bbaad9ec79373ed6badaf9/PySocks-1.7.1-py3-none-any.whl";
 
     // Бэкенд = исходники RVC (Applio 3.6.4). Ссылку можно переопределить в настройках.
-    private const string BackendVersion = "3.6.5";
+    private const string BackendVersion = "3.6.6";
 
 
     /// <summary>

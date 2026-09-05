@@ -9,10 +9,7 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>RvcVoiceChanger</AssemblyName>
     <RootNamespace>RvcVoiceChanger</RootNamespace>
-    <Version>1.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
-    <InformationalVersion>1.0</InformationalVersion>
+    <Version>1.0.0</Version>
     <Product>RVC Realtime Voice Changer</Product>
 
     <!-- Единый self-contained exe -->

@@ -39,7 +39,7 @@
                         <GridViewColumn Header="Время" Width="90" DisplayMemberBinding="{Binding TimeText}" />
                         <GridViewColumn Header="Уровень" Width="80" DisplayMemberBinding="{Binding LevelText}" />
                         <GridViewColumn Header="Источник" Width="110" DisplayMemberBinding="{Binding Source}" />
-                        <GridViewColumn Header="Сообщение" Width="720" DisplayMemberBinding="{Binding Message}" />
+                        <GridViewColumn Header="Сообщение" Width="580" DisplayMemberBinding="{Binding Message}" />
                     </GridView>
                 </ListView.View>
             </ListView>

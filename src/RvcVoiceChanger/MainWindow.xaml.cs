@@ -23,13 +23,44 @@ public partial class MainWindow : Window
     private readonly SettingsView _settingsView;
     private readonly LogsView _logsView;
 
+    // Размер, который нужен самой широкой вкладке (парсер и таблица моделей):
+    // окно сразу открывается так, чтобы ничего не приходилось растягивать руками.
+    private const double PreferredWidth = 1320;
+    private const double PreferredHeight = 820;
+
+    /// <summary>
+    /// Подбирает стартовый размер окна: берём нужный контенту, но никогда
+    /// не выходим за рабочую область экрана (иначе часть окна уезжает за границу).
+    /// </summary>
+    private void ApplyOptimalWindowSize()
+    {
+        var area = SystemParameters.WorkArea;
+
+        // Небольшой зазор, чтобы окно не прилипало к краям и к панели задач.
+        var maxWidth = Math.Max(720, area.Width - 40);
+        var maxHeight = Math.Max(520, area.Height - 40);
+
+        var width = Math.Min(PreferredWidth, maxWidth);
+        var height = Math.Min(PreferredHeight, maxHeight);
+
+        // На маленьких экранах минимальный размер не должен мешать окну уместиться.
+        if (MinWidth > width) MinWidth = width;
+        if (MinHeight > height) MinHeight = height;
+
+        Width = width;
+        Height = height;
+        Left = area.Left + (area.Width - width) / 2;
+        Top = area.Top + (area.Height - height) / 2;
+
+        // Экран меньше, чем требует контент — разворачиваем окно на всю область.
+        if (PreferredWidth > maxWidth || PreferredHeight > maxHeight)
+            WindowState = WindowState.Maximized;
+    }
+
     public MainWindow(AppSettings settings)
     {
         InitializeComponent();
-
-        // Размер под конкретный экран: на 1366x768 и при масштабе 125-150 % окно
-        // 1240x820 не влезает, и часть интерфейса оказывается за краем.
-        WindowSizing.FitToWorkArea(this, 1240, 820, 900, 560);
+        ApplyOptimalWindowSize();
 
         _settings = settings;
 
@@ -45,7 +76,7 @@ public partial class MainWindow : Window
         _settingsView = new SettingsView(_settings, _bridge);
         _logsView = new LogsView();
 
-        VersionText.Text = "версия 1.0 · Windows x64";
+        VersionText.Text = "версия 1.1 · Windows x64";
         Host.Content = _voiceView;
         UpdateThemeButton();
 

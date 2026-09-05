@@ -407,6 +407,17 @@ class VoiceEngine(object):
         actual_device = getattr(self.changer, "device", device)
         self.send_event("ready", "Модель готова за %.1f с (устройство: %s)" % (time.time() - start, actual_device))
 
+        # Индекс мог не прочитаться (битый файл, чужая размерность и т.п.).
+        # Бэкенд в этом случае работает без индекса — предупреждаем один раз.
+        if index_path:
+            pipeline = getattr(getattr(self.changer, "vc_model", None), "pipeline", None)
+            if pipeline is not None and not getattr(pipeline, "index", None):
+                self.send_event(
+                    "warn",
+                    "Файл .index не удалось загрузить — работаю без него "
+                    "(тембр будет менее похож, качество конверсии ниже)",
+                )
+
     # ---- обработка звука -----------------------------------------------------------
 
     def process(self, audio):
@@ -626,8 +637,21 @@ class Server(object):
             try:
                 result, volume = self.engine.process(audio)
             except Exception as exc:
-                self.send_event("error", "Ошибка обработки: %s" % exc)
-                log(traceback.format_exc(), "error")
+                # Ошибка повторяется на каждом блоке (десятки раз в секунду):
+                # печатаем её не чаще раза в 10 секунд, иначе лог заваливается
+                # тысячами одинаковых трейсбеков.
+                text = str(exc)
+                now = time.time()
+                self.error_count = getattr(self, "error_count", 0) + 1
+                same = text == getattr(self, "last_error_text", None)
+                if not same or now - getattr(self, "last_error_at", 0.0) > 10.0:
+                    repeats = self.error_count
+                    self.last_error_text = text
+                    self.last_error_at = now
+                    self.error_count = 0
+                    suffix = "" if repeats <= 1 else " (повторов: %d)" % repeats
+                    self.send_event("error", "Ошибка обработки: %s%s" % (text, suffix))
+                    log(traceback.format_exc(), "error")
                 continue
 
             if result is None:
