@@ -1,5 +1,7 @@
 <h1 align="center">RVC Voice Changer</h1>
 
+
+
 <p align="center">
   Изменение голоса в реальном времени на Windows. Один <code>.exe</code>, одно окно, всё на русском.
 </p>
@@ -10,6 +12,8 @@
   <img alt="dotnet" src="https://img.shields.io/badge/.NET-8.0-512BD4">
   <img alt="gpu" src="https://img.shields.io/badge/GPU-CUDA%20%7C%20CPU-76B900">
 </p>
+
+<img width="1541" height="1020" alt="image" src="https://github.com/user-attachments/assets/9a5d07ce-0628-4902-b21c-cdf3398b38c2" />
 
 ---
 
