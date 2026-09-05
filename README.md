@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.0-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-1.1-blue">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D6">
   <img alt="dotnet" src="https://img.shields.io/badge/.NET-8.0-512BD4">
   <img alt="gpu" src="https://img.shields.io/badge/GPU-CUDA%20%7C%20CPU-76B900">
