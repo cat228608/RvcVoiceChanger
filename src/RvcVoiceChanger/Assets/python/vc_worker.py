@@ -39,10 +39,107 @@ HEADER = struct.Struct("<Bi")
 # длиной) считаются ошибкой протокола. Симметрично лимиту в C# (64 МБ).
 MAX_FRAME_BYTES = 64 * 1024 * 1024
 
-# Очередь аудиоблоков между recv-циклом и потоком обработки.
+# Версия самого скрипта воркера. Печатается в журнал при подключении, чтобы
+# сразу было видно, какая именно копия запущена: рантайм живёт отдельной папкой
+# и раньше мог остаться со старым скриптом после обновления программы.
+WORKER_VERSION = "1.3-amd-diag"
+
+
+def explain_exception(exc):
+    """Читаемый текст исключения.
+
+    Ошибки из C++-ядра PyTorch приходят в системной кодировке Windows
+    (cp1251 на русской локали). Python разбирает их как UTF-8 и вместо
+    причины отдаёт UnicodeDecodeError. Сырые байты при этом лежат внутри
+    самого исключения — достаём и раскодируем их сами.
+    """
+    if isinstance(exc, UnicodeDecodeError):
+        raw = getattr(exc, "object", b"") or b""
+        if isinstance(raw, memoryview):
+            raw = raw.tobytes()
+        if isinstance(raw, (bytes, bytearray)):
+            raw = bytes(raw)
+            for encoding in ("cp1251", "cp1252", "utf-8"):
+                try:
+                    text = raw.decode(encoding)
+                except (UnicodeDecodeError, LookupError):
+                    continue
+                text = " ".join(text.split())
+                if text:
+                    return text
+            return raw.decode("latin-1", "replace")
+    return str(exc)
+
+
+def describe_location(exc):
+    """Где именно упало: последние кадры нашего кода плюс самый глубокий.
+
+    DirectML часто отдаёт системный текст вида «Параметр задан неверно.»
+    без названия операции. По одному такому сообщению причину не найти,
+    поэтому место падения кладём прямо в текст ошибки для интерфейса.
+    """
+    tb = getattr(exc, "__traceback__", None)
+    if tb is None:
+        return ""
+
+    try:
+        frames = traceback.extract_tb(tb)
+    except Exception:
+        return ""
+
+    if not frames:
+        return ""
+
+    def normalized(frame):
+        return (frame.filename or "").replace("\\", "/")
+
+    def fmt(frame):
+        return "%s:%d in %s" % (
+            os.path.basename(frame.filename or "?"),
+            frame.lineno or 0,
+            frame.name or "?",
+        )
+
+    ours = [
+        frame
+        for frame in frames
+        if "/rvc/" in normalized(frame) or normalized(frame).endswith("vc_worker.py")
+    ]
+
+    chain = []
+    for frame in (ours[-2:] if ours else []) + [frames[-1]]:
+        text = fmt(frame)
+        if text not in chain:
+            chain.append(text)
+
+    return " -> ".join(chain)
+
+# Необязательные аргументы VoiceChanger: если распакованный backend.zip старее
+# сборки и о них не знает, движок должен завестись без них, а не упасть.
+OPTIONAL_ENGINE_KWARGS = (
+    "device",
+    "precision",
+    "allow_tf32",
+    "torch_compile",
+    "torch_compile_mode",
+    "reduce_gpu_sync",
+    "use_ring_buffer",
+    "volume_gain_mode",
+    "soft_gate",
+    "soft_gate_hangover_ms",
+    "soft_gate_attack_ms",
+    "soft_gate_release_ms",
+)
+
+# Очере��ь аудиоблоков между recv-циклом и потоком обработки.
 # Если модель не успевает — старые блоки выбрасываются (задержка не растёт).
 # 2 блока, не больше: каждый лишний блок в очереди — это +целый блок скрытой задержки.
 AUDIO_QUEUE_MAX_BLOCKS = 2
+
+# Сколько блоков подряд должны упасть, чтобы увести всю обработку на процессор.
+# Если видеокарта не умеет какой-то операции, она не научится ей сама:
+# лучше один раз пересобрать движок на CPU, чем молчать и сыпать одинаковые ошибки.
+CPU_FALLBACK_AFTER_ERRORS = 5
 
 
 def _bootstrap_sys_path():
@@ -82,6 +179,12 @@ ENTRY_MODULES = (
     "rvc.configs.config",
 )
 
+# Необязательные пакеты: их отсутствие — норма, а не ошибка установки.
+# torch_directml нужен только для видеокарт AMD/Intel; на NVIDIA его не должно
+# быть. Без этого списка он попадал в missing_modules, установщик пытался его
+# доставить, а pip тянул за собой torch 2.4.1+cpu и numpy 2.x, убивая CUDA-сборку.
+OPTIONAL_MODULES = frozenset(("torch_directml",))
+
 
 def scan_missing_modules():
     """Статически обходит import-граф бэкенда и возвращает все недостающие пакеты.
@@ -112,6 +215,8 @@ def scan_missing_modules():
     def handle(name, source):
         top = name.split(".")[0]
         if not top or top in stdlib or top == "__future__":
+            return
+        if top in OPTIONAL_MODULES:
             return
         if local_path(name) or top == "rvc":
             walk(name)
@@ -181,6 +286,18 @@ def selftest():
         info = "torch %s, cuda=%s" % (torch.__version__, torch.cuda.is_available())
         if torch.cuda.is_available():
             info += ", gpu=%s" % torch.cuda.get_device_name(0)
+
+        # DirectML не обязателен, поэтому его отсутствие — не ошибка, а строка в отчёте.
+        try:
+            import torch_directml
+
+            if torch_directml.is_available() and torch_directml.device_count() > 0:
+                info += ", directml=%s" % torch_directml.device_name(0)
+            else:
+                info += ", directml=без адаптеров"
+        except Exception:
+            info += ", directml=не установлен"
+
         return info
 
     results.append(check("torch", torch_check))
@@ -235,7 +352,7 @@ def selftest():
             continue
         for mod_name in _re.findall(r"No module named '([^']+)'", str(item["detail"])):
             top = mod_name.split(".")[0]
-            if top and top not in missing:
+            if top and top not in missing and top not in OPTIONAL_MODULES:
                 missing[top] = item["name"]
 
     report["missing_modules"] = sorted(missing)
@@ -286,6 +403,10 @@ class VoiceEngine(object):
         self.params = {}
         self.lock = threading.Lock()
 
+        # Аварийный переезд на CPU делаем не более одного раза на сессию:
+        # если и на процессоре падает, дело не в устройстве.
+        self._cpu_fallback_done = False
+
     # ---- вспомогательное ------------------------------------------------------------
 
     @staticmethod
@@ -317,6 +438,31 @@ class VoiceEngine(object):
 
         if requested == "cpu":
             return "cpu"
+
+        # DirectML — путь для AMD и Intel Arc. Проверяем доступность здесь, чтобы
+        # сказать пользователю понятную причину, а само устройство разбирает уже
+        # rvc/configs/config.py — там же живёт и импорт torch_directml.
+        if requested in ("dml", "directml") or requested.startswith("privateuseone"):
+            try:
+                import torch_directml
+
+                if torch_directml.is_available() and torch_directml.device_count() > 0:
+                    print("[Info]: DirectML: %s" % torch_directml.device_name(0))
+                    return "dml"
+
+                self.send_event(
+                    "warn",
+                    "DirectML не видит ни одной видеокарты — переключаемся на CPU. "
+                    "Обновите драйвер видеокарты.",
+                )
+            except Exception as exc:
+                self.send_event(
+                    "warn",
+                    "torch-directml не установлен (%s) — переключаемся на CPU. "
+                    "Добавить его можно в настройках, кнопкой «Установить DirectML»." % exc,
+                )
+            return "cpu"
+
         if requested == "cuda":
             if torch.cuda.is_available():
                 return "cuda:0"
@@ -330,7 +476,50 @@ class VoiceEngine(object):
     def init(self, params):
         with self.lock:
             self.params = dict(params)
+            self._cpu_fallback_done = False
             self._build()
+
+    def fallback_to_cpu(self, reason="", where=""):
+        """Аварийный переезд на процессор: устройство не тянет пайплайн.
+
+        Поштучные откаты (F0, HuBERT, генератор) живут в pipeline.py, но если
+        ошибка летит из любого другого места и повторяется на каждом блоке —
+        спасает только полная пересборка движка на CPU.
+        """
+        with self.lock:
+            if self._cpu_fallback_done:
+                return False
+
+            self._cpu_fallback_done = True
+
+            if str(self.params.get("device", "auto")).lower() == "cpu":
+                return False
+
+            self.params["device"] = "cpu"
+
+            details = reason or "ошибка без описания"
+            if where:
+                details = "%s (%s)" % (details, where)
+
+            self.send_event(
+                "warn",
+                "Видеокарта не смогла обработать звук: %s. Перевожу обработку на процессор — "
+                "задержка вырастет, но голос будет. Обновите драйвер видеокарты; вернуть "
+                "DirectML можно в настройках." % details,
+            )
+
+            try:
+                self._build()
+            except Exception as exc:
+                self.send_event(
+                    "error",
+                    "Не удалось перейти на процессор: %s" % explain_exception(exc),
+                )
+                log(traceback.format_exc(), "error")
+                return False
+
+            self.send_event("ready", "Обработка переведена на процессор")
+            return True
 
     def update(self, params):
         with self.lock:
@@ -339,6 +528,10 @@ class VoiceEngine(object):
                 "f0_method", "embedder_model", "embedder_model_custom",
                 "silent_threshold", "vad_enabled", "clean_audio", "clean_strength",
                 "post_process", "device", "model_path", "index_path",
+                # Тип тензоров, графы и геометрия буферов задаются при загрузке
+                # весов и аллокации — менять их на ходу нельзя.
+                "precision", "allow_tf32", "torch_compile", "torch_compile_mode",
+                "use_ring_buffer",
             )
 
             needs_rebuild = any(
@@ -351,6 +544,42 @@ class VoiceEngine(object):
             if needs_rebuild and self.changer is not None:
                 self.send_event("log", "Параметры требуют перезапуска движка — пересоздаём")
                 self._build()
+            elif self.changer is not None:
+                # Огибающая, soft-gate и режим синков переключаются без рестарта.
+                self._apply_live(params)
+
+    def _apply_live(self, params):
+        """Применяет параметры, которые можно менять без перезагрузки модели."""
+        model = getattr(self.changer, "vc_model", None)
+        if model is None:
+            return
+
+        if "volume_gain_mode" in params:
+            mode = str(params.get("volume_gain_mode") or "interpolated").lower()
+            model.volume_gain_mode = (
+                "interpolated" if mode == "interpolated" else "block_scalar"
+            )
+
+        if "soft_gate" in params:
+            model.soft_gate = bool(params.get("soft_gate"))
+
+        if "reduce_gpu_sync" in params:
+            model.reduce_gpu_sync = bool(params.get("reduce_gpu_sync"))
+
+        if "soft_gate_hangover_ms" in params:
+            model.soft_gate_hangover_ms = max(
+                0.0, float(params.get("soft_gate_hangover_ms", 200))
+            )
+
+        if "soft_gate_attack_ms" in params:
+            model.soft_gate_attack_ms = max(
+                1.0, float(params.get("soft_gate_attack_ms", 15))
+            )
+
+        if "soft_gate_release_ms" in params:
+            model.soft_gate_release_ms = max(
+                1.0, float(params.get("soft_gate_release_ms", 80))
+            )
 
     def switch_model(self, params):
         with self.lock:
@@ -389,6 +618,23 @@ class VoiceEngine(object):
             record_audio=False,
             sid=0,
             device=device,
+            # ---- ускорение и GPU ----
+            precision=str(params.get("precision", "fp32")).lower(),
+            allow_tf32=bool(params.get("allow_tf32", True)),
+            torch_compile=bool(params.get("torch_compile", False)),
+            torch_compile_mode=str(
+                params.get("torch_compile_mode", "reduce-overhead")
+            ),
+            reduce_gpu_sync=bool(params.get("reduce_gpu_sync", False)),
+            use_ring_buffer=bool(params.get("use_ring_buffer", True)),
+            # ---- звучание ----
+            volume_gain_mode=str(
+                params.get("volume_gain_mode", "interpolated")
+            ).lower(),
+            soft_gate=bool(params.get("soft_gate", True)),
+            soft_gate_hangover_ms=float(params.get("soft_gate_hangover_ms", 200)),
+            soft_gate_attack_ms=float(params.get("soft_gate_attack_ms", 15)),
+            soft_gate_release_ms=float(params.get("soft_gate_release_ms", 80)),
         )
 
         if kwargs["post_process"]:
@@ -400,8 +646,15 @@ class VoiceEngine(object):
         try:
             self.changer = VoiceChanger(**kwargs)
         except TypeError:
-            # На случай, если версия бэкенда не знает части аргументов.
-            kwargs.pop("device", None)
+            # На случай, если версия бэкенда не знает части аргументов —
+            # отбрасываем всё необязательное и пробуем ещё раз.
+            for key in OPTIONAL_ENGINE_KWARGS:
+                kwargs.pop(key, None)
+            self.send_event(
+                "warn",
+                "Бэкенд не поддерживает новые параметры ускорения — запускаю в "
+                "базовом режиме (обновите backend.zip)",
+            )
             self.changer = VoiceChanger(**kwargs)
 
         actual_device = getattr(self.changer, "device", device)
@@ -458,14 +711,14 @@ class Server(object):
         self.engine = VoiceEngine(self.send_event)
         self.running = True
 
-        # Аудио обрабатывается в отдельном потоке: recv-цикл никогда не блокируется
+        # Аудио обрабатывается в отдельном ��отоке: recv-цикл никогда не блокируется
         # на модели, а ping/shutdown обрабатываются без задержек даже под нагрузкой.
         self.audio_queue = queue.Queue(maxsize=AUDIO_QUEUE_MAX_BLOCKS)
         self.dropped_blocks = 0
         self.last_drop_warn = 0.0
         self.audio_thread = threading.Thread(target=self._audio_loop, name="audio", daemon=True)
 
-    # ---- отправка --------------------------------------------------------------
+    # ---- отп��авка --------------------------------------------------------------
 
     def _send(self, frame_type, payload):
         if self.conn is None:
@@ -515,7 +768,7 @@ class Server(object):
 
         self.conn, _ = self.sock.accept()
         self.conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.send_event("log", "Соединение установлено")
+        self.send_event("log", "Соединение установлено (воркер %s)" % WORKER_VERSION)
 
         import numpy as np
 
@@ -529,7 +782,7 @@ class Server(object):
 
                 frame_type, length = HEADER.unpack(header)
 
-                # Валидация длины до выделения памяти: отрицательный/огромный int32 — ошибка протокола.
+                # Валидация длины до выделения памяти: отрицательный/огромны�� int32 — ошибка протокола.
                 if length < 0 or length > MAX_FRAME_BYTES:
                     self.send_event("error", "Некорректная длина кадра: %d — соединение закрывается" % length)
                     break
@@ -590,7 +843,7 @@ class Server(object):
             else:
                 self.send_event("warn", "Неизвестная команда: %s" % command)
         except Exception as exc:
-            self.send_event("error", "%s: %s" % (command, exc))
+            self.send_event("error", "%s: %s" % (command, explain_exception(exc)))
             log(traceback.format_exc(), "error")
 
     def _enqueue_audio(self, audio):
@@ -640,7 +893,8 @@ class Server(object):
                 # Ошибка повторяется на каждом блоке (десятки раз в секунду):
                 # печатаем её не чаще раза в 10 секунд, иначе лог заваливается
                 # тысячами одинаковых трейсбеков.
-                text = str(exc)
+                text = explain_exception(exc)
+                where = describe_location(exc)
                 now = time.time()
                 self.error_count = getattr(self, "error_count", 0) + 1
                 same = text == getattr(self, "last_error_text", None)
@@ -650,9 +904,25 @@ class Server(object):
                     self.last_error_at = now
                     self.error_count = 0
                     suffix = "" if repeats <= 1 else " (повторов: %d)" % repeats
-                    self.send_event("error", "Ошибка обработки: %s%s" % (text, suffix))
+                    place = " [%s]" % where if where else ""
+                    self.send_event(
+                        "error",
+                        "Ошибка обработки: %s%s%s" % (text, place, suffix),
+                    )
                     log(traceback.format_exc(), "error")
+
+                # Одна и та же ошибка на каждом блоке — значит, устройство чего-то не
+                # умеет и само не выправится. Пересобираем движок на процессоре.
+                self.consecutive_errors = getattr(self, "consecutive_errors", 0) + 1
+                if self.consecutive_errors >= CPU_FALLBACK_AFTER_ERRORS:
+                    self.consecutive_errors = 0
+                    try:
+                        self.engine.fallback_to_cpu(text, where)
+                    except Exception:
+                        log(traceback.format_exc(), "error")
                 continue
+
+            self.consecutive_errors = 0
 
             if result is None:
                 continue

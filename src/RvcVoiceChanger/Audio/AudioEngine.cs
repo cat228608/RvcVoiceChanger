@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using NAudio.CoreAudioApi;
@@ -9,7 +10,11 @@ using RvcVoiceChanger.Runtime;
 
 namespace RvcVoiceChanger.Audio;
 
-public enum EngineState { Stopped, Starting, Running, Error }
+/// <summary>
+/// Warmup — тракт уже идёт, но ядро ещё набивает контекст и отдаёт тишину:
+/// говорить в этот момент бессмысленно, первые слова не пройдут.
+/// </summary>
+public enum EngineState { Stopped, Starting, Warmup, Running, Error }
 
 /// <summary>
 /// Аудиотракт реального времени:
@@ -53,6 +58,28 @@ public sealed class AudioEngine : IDisposable
 
     private double _lastProcessMs;
 
+    /// <summary>Отметка нажатия «Старт» и счётчик оставшихся блоков прогрева.</summary>
+    private DateTime _startedAtUtc = DateTime.UtcNow;
+    private int _warmupBlocksLeft;
+
+    /// <summary>Сколько секунд идёт запуск/прогрев — для надписи «Инициализация…» в интерфейсе.</summary>
+    public double StartupSeconds => (DateTime.UtcNow - _startedAtUtc).TotalSeconds;
+
+    /// <summary>Оценка прогресса прогрева 0..1 (только после загрузки модели).</summary>
+    public double WarmupProgress
+    {
+        get
+        {
+            if (State == EngineState.Running) return 1;
+            if (State != EngineState.Warmup || _warmupBlocksTotal <= 0) return 0;
+
+            var done = _warmupBlocksTotal - _warmupBlocksLeft;
+            return Math.Clamp(done / (double)_warmupBlocksTotal, 0, 1);
+        }
+    }
+
+    private int _warmupBlocksTotal;
+
     /// <summary>
     /// Оценка сквозной задержки: буфер захвата + накопление блока + обработка +
     /// кроссфейд/SOLA + буфер вывода. extra_convert_size — контекст из ПРОШЛОГО
@@ -69,6 +96,7 @@ public sealed class AudioEngine : IDisposable
     {
         await StopAsync();
 
+        _startedAtUtc = DateTime.UtcNow;
         SetState(EngineState.Starting, null);
 
         try
@@ -82,8 +110,18 @@ public sealed class AudioEngine : IDisposable
             StartCapture();
             StartOutputs();
 
-            SetState(EngineState.Running, null);
-            Log.Info("Engine", $"Запущено. Блок {_blockSize} семплов (~{_blockSize * 1000.0 / SampleRate:F0} мс), оценка задержки ~{LatencyEstimateMs:F0} мс");
+            // Модель загружена и звук пошёл, но первые блоки ядро тратит на набивку
+            // контекста и отдаёт тишину (warmup_blocks в realtime/core.py). Значит, «работает»
+            // ≠ «можно говорить»: держим состояние Warmup, пока прогрев не пройдёт.
+            _warmupBlocksTotal = EstimateWarmupBlocks();
+            _warmupBlocksLeft = _warmupBlocksTotal;
+
+            SetState(EngineState.Warmup, null);
+
+            var blockMs = _blockSize * 1000.0 / SampleRate;
+            Log.Info("Engine", $"Запущено. Блок {_blockSize} семплов (~{blockMs:F0} мс), "
+                + $"прогрев {_warmupBlocksTotal} блоков (~{_warmupBlocksTotal * blockMs:F0} мс), "
+                + $"оценка задержки ~{LatencyEstimateMs:F0} мс");
         }
         catch (Exception ex)
         {
@@ -94,31 +132,149 @@ public sealed class AudioEngine : IDisposable
         }
     }
 
-    private void StartCapture()
+    /// <summary>
+    /// Сколько блоков ядро тратит на прогрев. Формула та же, что в realtime/core.py:
+    /// ceil(convert_size_16k / block_frame_16k) + 1. Пока они не прошли, на выход идёт тишина.
+    /// </summary>
+    private int EstimateWarmupBlocks()
     {
-        var device = AudioDevices.Get(_settings.InputDeviceId);
-        if (device == null)
+        var blockFrame16k = _blockSize / 3.0;
+        var convertSize = _blockSize
+            + (_settings.CrossFadeOverlapSize + 0.01) * SampleRate
+            + _settings.ExtraConvertSize * SampleRate;
+
+        var blocks = (int)Math.Ceiling(convertSize / 3.0 / blockFrame16k) + 1;
+        return Math.Clamp(blocks, 1, 64);
+    }
+
+    /// <summary>
+    /// Пришёл обработанный блок. Пока идёт прогрев — только считаем блоки; когда
+    /// прогрев закончился, переводим движок в Running — это и есть «можно говорить».
+    /// </summary>
+    private void NoteWarmupBlock()
+    {
+        if (State != EngineState.Warmup) return;
+
+        if (_warmupBlocksLeft > 0)
         {
-            using var enumerator = new MMDeviceEnumerator();
-            device = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications);
-            Log.Warn("Engine", "Входное устройство не выбрано — взяли микрофон по умолчанию");
+            _warmupBlocksLeft--;
+            return;
         }
 
-        _capture = new WasapiCapture(device, useEventSync: true, audioBufferMillisecondsLength: CaptureBufferMs)
+        var seconds = StartupSeconds;
+        SetState(EngineState.Running, null);
+        Log.Info("Engine", $"Можно говорить: инициализация заняла {seconds:F1} с");
+    }
+
+    private void StartCapture()
+    {
+        var deviceId = ResolveInputDeviceId();
+        if (deviceId == null)
+            throw new InvalidOperationException("Микрофон не найден: выберите устройство ввода в настройках.");
+
+        // Устройства капризны: в эксклюзивном режиме WASAPI часто не принимает формат mix
+        // (float32) и короткий буфер, а часть USB-микрофонов не умеет период 10 мс даже в общем
+        // режиме — AudioClient.Initialize отвечает E_INVALIDARG (ArgumentException в NAudio).
+        // Раньше это валило весь запуск, теперь перебираем режимы от лучшего к самому совместимому.
+        var attempts = new List<(bool Exclusive, bool ForcePcm16, int BufferMs)>();
+
+        if (_settings.ExclusiveMode)
         {
-            ShareMode = _settings.ExclusiveMode ? AudioClientShareMode.Exclusive : AudioClientShareMode.Shared
-        };
+            attempts.Add((true, false, CaptureBufferMs));
+            attempts.Add((true, true, CaptureBufferMs));
+            attempts.Add((true, true, 20));
+        }
 
-        Log.Info("Engine", $"Микрофон: {device.FriendlyName}, формат {_capture.WaveFormat}");
+        attempts.Add((false, false, CaptureBufferMs));
+        attempts.Add((false, false, 30));
+        attempts.Add((false, false, 0));
 
-        _capture.DataAvailable += OnCaptureData;
-        _capture.RecordingStopped += (_, e) =>
+        Exception? last = null;
+
+        foreach (var (exclusive, forcePcm16, bufferMs) in attempts)
         {
-            if (e.Exception != null)
-                Log.Error("Engine", "Захват звука остановлен с ошибкой", e.Exception);
-        };
+            // Каждой попытке нужен свежий MMDevice: NAudio берёт у устройства уже созданный
+            // AudioClient, а повторно инициализировать его после ошибки уже нельзя.
+            var device = AudioDevices.Get(deviceId);
+            if (device == null)
+                throw new InvalidOperationException("Микрофон недоступен — устройство отключено?");
 
-        _capture.StartRecording();
+            WasapiCapture? capture = null;
+
+            try
+            {
+                capture = new WasapiCapture(device, useEventSync: true, audioBufferMillisecondsLength: bufferMs)
+                {
+                    ShareMode = exclusive ? AudioClientShareMode.Exclusive : AudioClientShareMode.Shared
+                };
+
+                if (forcePcm16)
+                {
+                    // В эксклюзивном режиме устройства обычно принимают не float, а 16 бит PCM.
+                    var mix = device.AudioClient.MixFormat;
+                    capture.WaveFormat = new WaveFormat(mix.SampleRate, 16, Math.Max(1, mix.Channels));
+                }
+
+                capture.DataAvailable += OnCaptureData;
+                capture.RecordingStopped += (_, e) =>
+                {
+                    if (e.Exception != null)
+                        Log.Error("Engine", "Захват звука остановлен с ошибкой", e.Exception);
+                };
+
+                capture.StartRecording();
+                _capture = capture;
+
+                Log.Info("Engine", $"Микрофон: {device.FriendlyName}, формат {capture.WaveFormat}, "
+                    + (exclusive ? "эксклюзивный" : "общий") + " режим, буфер "
+                    + (bufferMs > 0 ? bufferMs + " мс" : "по умолчанию"));
+                return;
+            }
+            catch (Exception ex)
+            {
+                last = ex;
+
+                try
+                {
+                    if (capture != null)
+                    {
+                        capture.DataAvailable -= OnCaptureData;
+                        capture.Dispose();
+                    }
+                }
+                catch { }
+
+                Log.Warn("Engine", "Микрофон не принял режим ("
+                    + (exclusive ? "эксклюзивный" : "общий")
+                    + (forcePcm16 ? ", 16 бит" : "")
+                    + ", буфер " + (bufferMs > 0 ? bufferMs + " мс" : "по умолчанию")
+                    + "): " + ex.Message);
+            }
+        }
+
+        throw new InvalidOperationException(
+            "Не удалось открыть микрофон ни в одном режиме. Проверьте, что устройство не занято "
+            + "другой программой, и отключите «Эксклюзивный режим WASAPI» в настройках."
+            + (last != null ? " Последняя ошибка: " + last.Message : ""), last);
+    }
+
+    /// <summary>Идентификатор входного устройства: из настроек либо микрофон по умолчанию.</summary>
+    private string? ResolveInputDeviceId()
+    {
+        if (!string.IsNullOrWhiteSpace(_settings.InputDeviceId)) return _settings.InputDeviceId;
+
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            using var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications);
+            Log.Warn("Engine", "Входное устройство не выбрано — взяли микрофон по умолчанию");
+            return device.ID;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Engine", "Не удалось найти микрофон по умолчанию: " + ex.Message);
+            return null;
+        }
     }
 
     private void StartOutputs()
@@ -144,10 +300,8 @@ public sealed class AudioEngine : IDisposable
                     BufferDuration = TimeSpan.FromSeconds(2)
                 };
 
-                _virtualMicOut = new WasapiOut(target, _settings.ExclusiveMode ? AudioClientShareMode.Exclusive : AudioClientShareMode.Shared, true, OutputLatencyMs);
-                _virtualMicOut.Init(BuildOutputChain(_virtualMicBuffer, target));
-                _virtualMicOut.Play();
-                Log.Info("Engine", $"Вывод (виртуальный микрофон): {target.FriendlyName}");
+                _virtualMicOut = StartOutput(target, _virtualMicBuffer, _settings.ExclusiveMode,
+                    "Вывод (виртуальный микрофон)");
             }
             else
             {
@@ -166,12 +320,57 @@ public sealed class AudioEngine : IDisposable
                     BufferDuration = TimeSpan.FromSeconds(2)
                 };
 
-                _monitorOut = new WasapiOut(monitor, AudioClientShareMode.Shared, true, OutputLatencyMs);
-                _monitorOut.Init(BuildOutputChain(_monitorBuffer, monitor));
-                _monitorOut.Play();
-                Log.Info("Engine", $"Самопрослушка: {monitor.FriendlyName}");
+                _monitorOut = StartOutput(monitor, _monitorBuffer, false, "Самопрослушка");
             }
         }
+    }
+
+    /// <summary>
+    /// Открывает устройство вывода, перебирая режимы. Эксклюзивный режим часть устройств
+    /// не принимает вовсе (виртуальные кабели в том числе), а слишком маленькая задержка
+    /// даёт E_INVALIDARG. Ошибка вывода теперь не валит весь тракт.
+    /// </summary>
+    private WasapiOut? StartOutput(MMDevice target, BufferedWaveProvider buffer, bool allowExclusive, string label)
+    {
+        var attempts = new List<(bool Exclusive, int LatencyMs)>();
+        if (allowExclusive) attempts.Add((true, OutputLatencyMs));
+        attempts.Add((false, OutputLatencyMs));
+        attempts.Add((false, 60));
+
+        Exception? last = null;
+
+        foreach (var (exclusive, latencyMs) in attempts)
+        {
+            // Свежий MMDevice на ка��дую попытку — по той же причине, что и для захвата.
+            var device = AudioDevices.Get(target.ID) ?? target;
+            WasapiOut? output = null;
+
+            try
+            {
+                output = new WasapiOut(device,
+                    exclusive ? AudioClientShareMode.Exclusive : AudioClientShareMode.Shared,
+                    true, latencyMs);
+
+                output.Init(BuildOutputChain(buffer, device));
+                output.Play();
+
+                Log.Info("Engine", $"{label}: {device.FriendlyName} "
+                    + "(" + (exclusive ? "эксклюзивный" : "общий") + " режим, " + latencyMs + " мс)");
+                return output;
+            }
+            catch (Exception ex)
+            {
+                last = ex;
+                try { output?.Dispose(); } catch { }
+
+                Log.Warn("Engine", $"{label}: устройство не приняло режим ("
+                    + (exclusive ? "эксклюзивный" : "общий") + ", " + latencyMs + " мс): " + ex.Message);
+            }
+        }
+
+        Log.Error("Engine", $"{label}: устройство не открылось ни в одном режиме"
+            + (last != null ? ": " + last.Message : ""));
+        return null;
     }
 
     /// <summary>Доводим mono 48k float до формата устройства (обычно stereo).</summary>
@@ -218,11 +417,12 @@ public sealed class AudioEngine : IDisposable
 
                 if (_accumulated < _blockSize) continue;
 
-                var block = new float[_blockSize];
-                Array.Copy(_inputAccumulator, block, _blockSize);
                 _accumulated = 0;
 
-                _ = _bridge.SendAudioAsync(block, block.Length);
+                // TrySendAudio копирует блок синхронно и ставит его в очередь
+                // единственного писателя. Поэтому аккумулятор можно переиспользовать
+                // сразу, а массив на каждый блок больше не аллоцируется.
+                _bridge.TrySendAudio(_inputAccumulator, _blockSize);
             }
         }
     }
@@ -250,6 +450,8 @@ public sealed class AudioEngine : IDisposable
     private void OnAudioReady(float[] samples, WorkerStats stats)
     {
         _lastProcessMs = stats.ProcessMs;
+
+        NoteWarmupBlock();
 
         var gain = (float)Math.Pow(10, _settings.OutputGainDb / 20.0);
         float peak = 0;

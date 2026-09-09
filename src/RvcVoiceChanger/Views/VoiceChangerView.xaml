@@ -106,6 +106,19 @@
                                      Background="{DynamicResource Bg3}" BorderThickness="0" />
                     </Grid>
 
+                    <!-- Стадия запуска: пока идёт загрузка модели и прогрев ядра,
+                         говорить бессмысленно — на выход идёт тишина. -->
+                    <Border x:Name="ReadyBanner" Margin="0,14,0,0" Padding="12,8" CornerRadius="6"
+                            Background="{DynamicResource Bg3}" Visibility="Collapsed">
+                        <StackPanel>
+                            <TextBlock x:Name="ReadyText" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource Warn}" TextWrapping="Wrap" />
+                            <ProgressBar x:Name="ReadyProgress" Height="6" Maximum="1" Margin="0,8,0,0"
+                                         IsIndeterminate="True" BorderThickness="0"
+                                         Foreground="{DynamicResource Warn}" Background="{DynamicResource Bg2}" />
+                        </StackPanel>
+                    </Border>
+
                     <TextBlock x:Name="LatencyText" Style="{StaticResource Hint}" Margin="0,12,0,0" />
                 </StackPanel>
             </GroupBox>

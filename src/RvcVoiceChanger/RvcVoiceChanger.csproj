@@ -9,7 +9,12 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>RvcVoiceChanger</AssemblyName>
     <RootNamespace>RvcVoiceChanger</RootNamespace>
-    <Version>1.0.0</Version>
+    <!-- Версия сборки. Version/FileVersion должны быть числовыми (Windows не примет слово
+         alpha в ресурсе версии), а полное имя с признаком предрелиза живёт в InformationalVersion. -->
+    <Version>1.2.0</Version>
+    <FileVersion>1.2.0.0</FileVersion>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <InformationalVersion>1.2.0-alpha</InformationalVersion>
     <Product>RVC Realtime Voice Changer</Product>
 
     <!-- Единый self-contained exe -->

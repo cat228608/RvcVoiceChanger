@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.1-blue">
+  <img alt="version" src="https://img.shields.io/badge/version-1.2%20alpha-orange">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D6">
   <img alt="dotnet" src="https://img.shields.io/badge/.NET-8.0-512BD4">
   <img alt="gpu" src="https://img.shields.io/badge/GPU-CUDA%20%7C%20CPU-76B900">
@@ -54,7 +54,7 @@
 5. На вкладке **Изменение голоса** выберите модель и микрофон, задайте высоту тона и нажмите **Старт**.
 6. В Discord / OBS / игре выберите микрофон **CABLE Output**.
 
-> Кнопка **«Проверка»** позволяет услышать себя до того, как вас услышат другие.
+> Кнопка **«Проверка»** позволяет услышать себя до то��о, как вас услышат другие.
 
 ## Интерфейс
 
@@ -116,7 +116,7 @@ Windows не позволяет создать виртуальный микро
 ## Архитектура
 
 ```
-WPF UI (C#) ── WASAPI захват ── блоки float32 48кГц
+WPF UI (C#) ── WASAPI захват ── блоки float32 48кГ��
                                   │  TCP 127.0.0.1 (бинарные кадры)
                           vc_worker.py ── rvc.realtime.core.VoiceChanger
                                   │

@@ -71,6 +71,10 @@ public static class Program
             settings = SettingsStore.Load();
         }
 
+        // Скрипт воркера обновляем на каждом запуске: установка целиком пропускается,
+        // когда окружение уже стоит, и без этого исправления в vc_worker.py никогда не доезжали до диска.
+        RuntimeInstaller.EnsureWorkerScriptCurrent();
+
         var window = new MainWindow(settings);
         app.MainWindow = window;
         // Только теперь закрытие главного окна должно завершать приложение.

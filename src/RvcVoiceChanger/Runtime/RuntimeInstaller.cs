@@ -37,6 +37,14 @@ public sealed class RuntimeInstaller
 
     /// <summary>Версия torch. Поднята до 2.5.1: именно она чаще всего уже есть у людей на диске.</summary>
     private const string TorchVersion = "2.5.1";
+
+    /// <summary>
+    /// torch-directml собран под КОНКРЕТНУЮ версию torch и с другой не заводится.
+    /// Поэтому у ветки DirectML своя, более старая версия torch. На CUDA-ветку это никак
+    /// не влияет: там по-прежнему ставится TorchVersion с индекса cu121.
+    /// </summary>
+    private const string TorchVersionDirectMl = "2.4.1";
+    private const string TorchDirectMlVersion = "0.2.5.dev240914";
     private const string GetPipUrl = "https://bootstrap.pypa.io/get-pip.py";
 
     // Запасной способ бутстрапа pip: zipapp, работает без site-packages.
@@ -76,7 +84,7 @@ public sealed class RuntimeInstaller
     /// <summary>
     /// Веса моделей. В exe их не вошьёшь — это сотни мегабайт, но любой файл можно
     /// положить руками в папку prereq — тогда скачивание пропускается.
-    /// MinBytes — минимальный правдоподобный размер: защита от HTML-заглушек и оборванных загрузок.
+    /// MinBytes — минимальный правдо��одо��ный размер: защита от HTML-заглушек и оборванных загрузок.
     /// </summary>
     private (string Url, string RelativePath, bool Optional, long MinBytes)[] PrerequisiteList()
     {
@@ -115,6 +123,10 @@ public sealed class RuntimeInstaller
             // Смена версии Python делает все старые пакеты негодными — ставим рантайм заново.
             if (stamp.PythonVersion != PythonVersion) return false;
 
+            // Битую пару torch/torchaudio нельзя считать установленным окружением: иначе
+            // программа каждый раз запускается и падает на импорте torch в воркере.
+            if (!TorchLooksSane(stamp.TorchFlavor)) return false;
+
             // Содержимое бэкенда меняется вместе с обновлениями программы, а номер версии Applio — нет.
             // Сравниваем хеш вшитого архива с тем, что развёрнуто на диске.
             return BackendContentIsCurrent();
@@ -142,6 +154,19 @@ public sealed class RuntimeInstaller
         var output = p.StandardOutput.ReadToEnd();
         p.WaitForExit(timeoutMs);
         return p.HasExited && p.ExitCode == 0 ? output : "";
+    }
+
+    /// <summary>
+    /// Есть ли NVIDIA с драйвером, которого хватает для CUDA 12.1. Вынесено отдельно,
+    /// чтобы окно первого запуска судило по тому же критерию, что и установщик,
+    /// и не дублировало порог версии драйвера у себя.
+    /// </summary>
+    public static bool NvidiaUsable()
+    {
+        if (!HasNvidiaGpu()) return false;
+
+        var driver = NvidiaDriverMajor();
+        return driver <= 0 || driver >= MinCudaDriverMajor;
     }
 
     /// <summary>Есть ли NVIDIA GPU — от этого зависит, ставим ли torch+cu121 или CPU-сборку.</summary>
@@ -176,6 +201,44 @@ public sealed class RuntimeInstaller
 
     public async Task InstallAsync(IProgress<InstallProgress> progress, CancellationToken ct)
     {
+        // Штамп снимаем сразу: если установка сорвётся посередине, отпечаток бэкенда
+        // уже успеет обновиться, и старый штамп сделает битое окружение «установленным».
+        InvalidateInstallStamp("началась установка");
+
+        var torchFlavor = ResolveTorchFlavor(progress);
+
+        await CheckProxyReachableAsync(progress, ct);
+        await EnsurePythonAsync(progress, ct);
+        await EnsurePipAsync(progress, ct);
+        await InstallPipPackagesAsync(torchFlavor, progress, ct);
+        await EnsureBackendAsync(progress, ct);
+        await EnsurePrerequisitesAsync(progress, ct);
+        await VerifyAsync(progress, ct);
+
+        var stamp = new InstallStamp(PythonVersion, BackendVersion, torchFlavor, DateTime.Now);
+        File.WriteAllText(AppPaths.InstallStampFile, JsonSerializer.Serialize(stamp, new JsonSerializerOptions { WriteIndented = true }));
+
+        progress.Report(new InstallProgress("Готово", "Все зависимости установлены и проверены", 100));
+        Log.Info("Installer", "Установка завершена");
+    }
+
+    /// <summary>
+    /// Какую сборку torch ставить: cu121 (NVIDIA), dml (AMD / Intel Arc) или cpu.
+    /// Порядок важен: явно выбранный в настройках DirectML сильнее автоопределения,
+    /// а во всём остальном логика та же, что была до появления DirectML.
+    /// </summary>
+    private string ResolveTorchFlavor(IProgress<InstallProgress> progress)
+    {
+        // Пользователь мог выбрать DirectML сам — в том числе на машине с NVIDIA.
+        // Этот выбор важнее автоопределения.
+        if (_settings.Device == ComputeDevice.DirectMl)
+        {
+            Log.Info("Installer", "Выбран DirectML — ставим torch " + TorchVersionDirectMl + " и torch-directml");
+            progress.Report(new InstallProgress("GPU",
+                "Режим DirectML: расчёт пойдёт на видеокарте AMD / Intel", 1));
+            return "dml";
+        }
+
         var gpu = HasNvidiaGpu();
 
         if (gpu)
@@ -193,26 +256,30 @@ public sealed class RuntimeInstaller
             }
         }
 
-        var torchFlavor = gpu ? "cu121" : "cpu";
-        Log.Info("Installer", gpu
-            ? "Найдена NVIDIA GPU — ставим torch с CUDA 12.1"
-            : "NVIDIA GPU не найдена или непригодна — ставим CPU-сборку torch (будет медленнее)");
-        if (!gpu)
+        if (gpu)
+        {
+            Log.Info("Installer", "Найдена NVIDIA GPU — ставим torch с CUDA 12.1");
+            return "cu121";
+        }
+
+        Log.Info("Installer", "NVIDIA GPU не найдена или непригодна — ставим CPU-сборку torch (будет медленнее)");
+
+        // NVIDIA нет — но может быть AMD или Intel Arc. Сами на DirectML не переключаемся:
+        // это другая версия torch и лишние гигабайты загрузки, решает пользователь.
+        var candidate = GpuInspector.DirectMlCandidate();
+        if (candidate != null)
+        {
+            var hint = "Найдена " + candidate.Name +
+                       " — её можно задействовать через DirectML в настройках (вкладка «Настройки»)";
+            Log.Info("Installer", hint);
+            progress.Report(new InstallProgress("GPU", hint, 1));
+        }
+        else
+        {
             progress.Report(new InstallProgress("GPU", "GPU не используется: будет установлена CPU-версия torch", 1));
+        }
 
-        await CheckProxyReachableAsync(progress, ct);
-        await EnsurePythonAsync(progress, ct);
-        await EnsurePipAsync(progress, ct);
-        await InstallPipPackagesAsync(torchFlavor, progress, ct);
-        await EnsureBackendAsync(progress, ct);
-        await EnsurePrerequisitesAsync(progress, ct);
-        await VerifyAsync(progress, ct);
-
-        var stamp = new InstallStamp(PythonVersion, BackendVersion, torchFlavor, DateTime.Now);
-        File.WriteAllText(AppPaths.InstallStampFile, JsonSerializer.Serialize(stamp, new JsonSerializerOptions { WriteIndented = true }));
-
-        progress.Report(new InstallProgress("Готово", "Все зависимости установлены и проверены", 100));
-        Log.Info("Installer", "Установка завершена");
+        return "cpu";
     }
 
     private async Task EnsurePythonAsync(IProgress<InstallProgress> progress, CancellationToken ct)
@@ -232,7 +299,7 @@ public sealed class RuntimeInstaller
             Log.Info("Installer", "Удаляю старый рантайм Python: нужен " + PythonVersion);
 
             // Пакеты в site-packages могли качаться часами (torch — гигабайты).
-            // Перед пересозданием рантайма откладываем их в сторону и возвращаем после распаковки:
+            // Перед пересоздан��ем рантайма откладываем их в сторону и возвращаем после распаковки:
             // для той же версии Python они полностью работоспособны, а для другой их перепроверит pip.
             var savedPackages = Path.Combine(AppPaths.Temp, "site-packages-saved");
             var oldPackages = Path.Combine(AppPaths.Python, "Lib", "site-packages");
@@ -348,7 +415,7 @@ public sealed class RuntimeInstaller
             await BootstrapPipWithPyzAsync(progress, ct);
         }
 
-        // Проверяем, что pip реально завёлся.
+        // ��роверяем, что pip реально завёлся.
         var (checkCode, checkOut) = await RunPythonCaptureAsync(new[] { "-m", "pip", "--version" }, ct);
         if (checkCode != 0)
         {
@@ -377,7 +444,7 @@ public sealed class RuntimeInstaller
                 "Файл pip.pyz скачался битым (" + size + " байт). Похоже, прокси или провайдер подменяет ответ. Проверьте настройки прокси.");
 
         // pip.pyz тоже не умеет SOCKS5 без PySocks, поэтому wheel самого pip скачиваем
-        // нашим загрузчиком (он умеет SOCKS5 нативно) и ставим офлайн.
+        // нашим загрузчиком (он ум��ет SOCKS5 нативно) и ставим офлайн.
         var (wheelUrl, wheelSha) = await ResolvePypiWheelAsync("pip", PipPinnedVersion, PipPinnedWheelUrl, ct);
         var pipWheel = Path.Combine(AppPaths.Downloads, "pip-" + PipPinnedVersion + "-py3-none-any.whl");
         if (!File.Exists(pipWheel) || new FileInfo(pipWheel).Length < 500_000)
@@ -540,7 +607,7 @@ public sealed class RuntimeInstaller
         if (!PySocksReady())
             throw new InvalidOperationException(
                 "Выбран SOCKS5, но библиотека PySocks не установилась.\n" +
-                "Без неё pip не умеет работать через SOCKS5 и будет бесконечно повторять попытки.\n" +
+                "Без неё pip не умеет работать через SOCKS5 и ��удет бесконечно повторять попытки.\n" +
                 "Переключите прокси на HTTP или проверьте журнал установки.");
 
         Log.Info("Installer", "PySocks на месте, SOCKS5 для pip доступен");
@@ -815,7 +882,10 @@ public sealed class RuntimeInstaller
         // уже есть (например, перенесён из другого окружения) — качать его нет смысла.
         var installedTorch = await TorchInfoAsync(ct);
 
-        if (TorchIsSuitable(installedTorch, torchFlavor))
+        // Для DirectML мало подходящего torch — нужен ещё сам torch-directml, увидевший видеокарту.
+        var directMlReady = torchFlavor == "dml" && await DirectMlReadyAsync(ct);
+
+        if (TorchIsSuitable(installedTorch, torchFlavor, directMlReady))
         {
             progress.Report(new InstallProgress("torch", "Уже установлен: " + installedTorch, 55));
             Log.Info("Installer", "Шаг torch пропущен, найдена подходящая сборка: " + installedTorch);
@@ -827,14 +897,43 @@ public sealed class RuntimeInstaller
 
             // torch ставим отдельно: у него свой индекс. Индекс можно переопределить в настройках
             // (TorchIndexUrl), а пользовательское зеркало PyPI добавляется как запасной источник.
+            // У ветки DirectML своя версия torch: torch-directml жёстко привязан к ней.
+            var version = torchFlavor == "dml" ? TorchVersionDirectMl : TorchVersion;
+
+            // Сначала полностью снимаем то, что уже стоит: pip удаляет лишь файлы из своего
+            // RECORD, а остатки чужой сборки в torch\lib ломают импорт (WinError 127). Заодно
+            // убираем соседей, жёстко привязанных к другой версии torch: именно они заставляют
+            // pip искать «совместимую» пару и уходить на свежайший torch с PyPI.
+            var conflicting = new List<string> { "-m", "pip", "uninstall", "-y", "torch", "torchaudio", "torchvision" };
+            if (torchFlavor != "dml") conflicting.Add("torch-directml");
+
+            await RunPythonCaptureAsync(conflicting.ToArray(), ct);
+            PurgeTorchDirectories(torchFlavor);
+
             var torchArgs = new List<string> { "-m", "pip", "install", "--no-warn-script-location", "--no-cache-dir" };
             torchArgs.AddRange(PipProgressArgs());
-            torchArgs.Add("torch==" + TorchVersion);
-            torchArgs.Add("torchaudio==" + TorchVersion);
+            torchArgs.Add("torch==" + version);
+            torchArgs.Add("torchaudio==" + version);
 
-            var torchIndex = !string.IsNullOrWhiteSpace(_settings.TorchIndexUrl)
-                ? _settings.TorchIndexUrl.Trim()
-                : torchFlavor == "cu121" ? "https://download.pytorch.org/whl/cu121" : null;
+            // torch-directml ставим т��м же вызовом: pip сразу проверит совместимость версий.
+            if (torchFlavor == "dml")
+                torchArgs.Add("torch-directml==" + TorchDirectMlVersion);
+
+            var torchIndex = torchFlavor switch
+            {
+                // Пакеты DirectML лежат на обычном PyPI, а не на индексе pytorch.org.
+                // Зеркало из настроек подключаем дополнительным источником ниже, а не основным:
+                // torch-directml на произвольном зеркале может отсутствовать.
+                "dml" => null,
+
+                "cu121" => !string.IsNullOrWhiteSpace(_settings.TorchIndexUrl)
+                    ? _settings.TorchIndexUrl.Trim()
+                    : "https://download.pytorch.org/whl/cu121",
+
+                _ => !string.IsNullOrWhiteSpace(_settings.TorchIndexUrl)
+                    ? _settings.TorchIndexUrl.Trim()
+                    : null
+            };
 
             if (torchIndex != null)
             {
@@ -850,6 +949,7 @@ public sealed class RuntimeInstaller
             }
 
             torchArgs.AddRange(PipNetworkArgs(includeIndex: false));
+            torchArgs.AddRange(ConstraintArgs(torchFlavor));
 
             progress.Report(new InstallProgress("torch", "Установка PyTorch (это самый долгий шаг)...", 16));
             await RunPipWithRepairAsync(torchArgs, progress, "torch", 16, 55, ct);
@@ -858,6 +958,10 @@ public sealed class RuntimeInstaller
         var reqArgs = new List<string> { "-m", "pip", "install", "--no-warn-script-location", "--no-cache-dir", "-r", reqFile };
         reqArgs.AddRange(PipProgressArgs());
         reqArgs.AddRange(PipNetworkArgs());
+        // Обязательно именно здесь: torchcrepe и torchfcpe требуют torch/torchaudio без версий,
+        // и pip, увидев рядом несогласованную пару, способен снести наш torch и поставить самый
+        // свежий с PyPI — окружение после этого не грузится вообще.
+        reqArgs.AddRange(ConstraintArgs(torchFlavor));
 
         progress.Report(new InstallProgress("pip", "Установка остальных зависимостей...", 56));
         await RunPipWithRepairAsync(reqArgs, progress, "pip", 56, 72, ct);
@@ -903,7 +1007,7 @@ public sealed class RuntimeInstaller
     }
 
     /// <summary>Годится ли уже установленный torch: версия не ниже 2.4 и есть CUDA, если она нужна.</summary>
-    private static bool TorchIsSuitable(string info, string torchFlavor)
+    private static bool TorchIsSuitable(string info, string torchFlavor, bool directMlReady = false)
     {
         if (info.Length == 0) return false;
 
@@ -918,9 +1022,246 @@ public sealed class RuntimeInstaller
         // torchaudio должен быть той же версии, иначе он не загрузится вместе с torch.
         if (parts[1].Split('+')[0] != parts[0].Split('+')[0]) return false;
 
+        if (torchFlavor == "dml")
+        {
+            // Здесь правило «не ниже» не годится: torch-directml ��аботает только с той
+            // версией torch, под которую собран.
+            if (parts[0].Split('+')[0] != TorchVersionDirectMl) return false;
+            return directMlReady;
+        }
+
         if (torchFlavor == "cu121" && !parts[2].StartsWith("True", StringComparison.OrdinalIgnoreCase)) return false;
 
         return true;
+    }
+
+    /// <summary>Установлен ли torch-directml и видит ли он видеокарту.</summary>
+    public async Task<bool> DirectMlReadyAsync(CancellationToken ct)
+    {
+        try
+        {
+            if (!File.Exists(AppPaths.PythonExe)) return false;
+
+            const string code = "import torch_directml; print(bool(torch_directml.is_available()))";
+            var (exit, output) = await RunPythonCaptureAsync(new[] { "-c", code }, ct);
+
+            return exit == 0 && output.Contains("True", StringComparison.Ordinal);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.Debug("Installer", "Проверка torch-directml не удалась: " + ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>Короткая сводка о состоянии DirectML для показа в настройках.</summary>
+    public async Task<string> DirectMlStatusAsync(CancellationToken ct)
+    {
+        try
+        {
+            if (!File.Exists(AppPaths.PythonExe)) return "Окружение ещё не установлено";
+
+            const string code =
+                "import torch_directml as d\n" +
+                "n = d.device_count()\n" +
+                "print('ok', n, d.device_name(0) if n else '')";
+
+            var (exit, output) = await RunPythonCaptureAsync(new[] { "-c", code }, ct);
+            var text = output.Trim();
+
+            if (exit != 0 || !text.Contains("ok", StringComparison.Ordinal))
+                return "torch-directml не установлен";
+
+            var line = text.Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.StartsWith("ok", StringComparison.Ordinal)) ?? "";
+            var parts = line.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+
+            if (parts.Length >= 3 && parts[1] != "0")
+                return "Го��ово: " + parts[2] + " (адаптеров: " + parts[1] + ")";
+
+            return "torch-directml установлен, но не видит ни одной видеокарты — обновите драйвер GPU";
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return "Не удалось проверить: " + ex.Message;
+        }
+    }
+
+    /// <summary>Какая сборка torch записана в отметке установки (cu121 / dml / cpu). Пусто — неизвестно.</summary>
+    public static string InstalledTorchFlavor()
+    {
+        try
+        {
+            if (!File.Exists(AppPaths.InstallStampFile)) return "";
+            var stamp = JsonSerializer.Deserialize<InstallStamp>(File.ReadAllText(AppPaths.InstallStampFile));
+            return stamp?.TorchFlavor ?? "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    /// <summary>Переписывает в отметке установки только сборку torch, не трогая остальные поля.</summary>
+    private static void UpdateStampFlavor(string torchFlavor)
+    {
+        try
+        {
+            InstallStamp? stamp = null;
+            if (File.Exists(AppPaths.InstallStampFile))
+                stamp = JsonSerializer.Deserialize<InstallStamp>(File.ReadAllText(AppPaths.InstallStampFile));
+
+            var updated = new InstallStamp(
+                stamp?.PythonVersion ?? PythonVersion,
+                stamp?.BackendVersion ?? BackendVersion,
+                torchFlavor,
+                DateTime.Now);
+
+            File.WriteAllText(AppPaths.InstallStampFile,
+                JsonSerializer.Serialize(updated, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("Installer", "Не удалось обновить отметку установки: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Догружает DirectML в уже установленное окружение — для тех, кто отказался на первом
+    /// запуске и передумал.
+    ///
+    /// ВАЖНО: torch-directml требует torch ровно <see cref="TorchVersionDirectMl"/>, поэтому torch
+    /// будет переустановлен на эту версию. Если была CUDA-сборка, она уйдёт; вернуть её
+    /// можно, переключив «Вычисления» обратно и нажав кнопку возврата CUDA.
+    /// </summary>
+    public async Task InstallDirectMlAsync(IProgress<InstallProgress> progress, CancellationToken ct)
+    {
+        if (!File.Exists(AppPaths.PythonExe))
+            throw new InvalidOperationException(
+                "Сначала нужно установить окружение целиком (первый запуск), а потом добавлять DirectML.");
+
+        await EnsurePySocksAsync(progress, ct);
+        await EnsurePipUsableAsync(progress, ct);
+
+        var args = new List<string> { "-m", "pip", "install", "--no-warn-script-location", "--no-cache-dir" };
+        args.AddRange(PipProgressArgs());
+        args.Add("torch==" + TorchVersionDirectMl);
+        args.Add("torchaudio==" + TorchVersionDirectMl);
+        args.Add("torch-directml==" + TorchDirectMlVersion);
+
+        if (!string.IsNullOrWhiteSpace(_settings.PipIndexUrl))
+        {
+            args.Add("--extra-index-url");
+            args.Add(_settings.PipIndexUrl.Trim());
+        }
+
+        // includeIndex: false — основным индексом остаётся PyPI, там лежит torch-directml.
+        args.AddRange(PipNetworkArgs(includeIndex: false));
+        // Без ограничений torch-directml поднимает numpy до 2.x и ломает faiss и numba.
+        args.AddRange(ConstraintArgs("dml"));
+
+        progress.Report(new InstallProgress("DirectML",
+            "Установка torch " + TorchVersionDirectMl + " и torch-directml (качается около 2 ГБ)...", 5));
+
+        await RunPipWithRepairAsync(args, progress, "DirectML", 5, 90, ct);
+
+        if (!await DirectMlReadyAsync(ct))
+            throw new InvalidOperationException(
+                "torch-directml установился, но не видит видеокарту.\n" +
+                "Проверьте, что драйвер видеокарты свежий, а сама Windows — версии 10 (1903) или новее.\n" +
+                "Подробности в журнале установки.");
+
+        // Без этого следующая проверка установки считала бы, что стоит прежняя сборка.
+        UpdateStampFlavor("dml");
+
+        var status = await DirectMlStatusAsync(ct);
+        Log.Info("Installer", "DirectML установлен. " + status);
+        progress.Report(new InstallProgress("DirectML", status, 100));
+    }
+
+    /// <summary>
+    /// Возвращает окружение к CUDA- или CPU-сборке torch после экспериментов с DirectML.
+    /// Нужно, чтобы уход на DirectML был обратимым в одно нажатие.
+    /// </summary>
+    public async Task RestoreDefaultTorchAsync(IProgress<InstallProgress> progress, CancellationToken ct)
+    {
+        if (!File.Exists(AppPaths.PythonExe))
+            throw new InvalidOperationException("Окружение ещё не установлено.");
+
+        await EnsurePySocksAsync(progress, ct);
+        await EnsurePipUsableAsync(progress, ct);
+
+        // Сначала убираем torch-directml: он требует старый torch и будет тянуть его обратно.
+        progress.Report(new InstallProgress("torch", "Удаляю torch-directml...", 5));
+        await RunPythonCaptureAsync(new[] { "-m", "pip", "uninstall", "-y", "torch-directml" }, ct);
+        // torchvision пришёл зависимостью torch-directml и требует ровно torch 2.4.1: если оставить
+        // его в окружении, pip на следующей установке начнёт искать «совместимую» пару на PyPI.
+        await RunPythonCaptureAsync(new[] { "-m", "pip", "uninstall", "-y", "torchvision" }, ct);
+
+        var flavor = ResolveTorchFlavorWithoutDirectMl();
+
+        var args = new List<string> { "-m", "pip", "install", "--no-warn-script-location", "--no-cache-dir", "--force-reinstall" };
+        args.AddRange(PipProgressArgs());
+        args.Add("torch==" + TorchVersion);
+        args.Add("torchaudio==" + TorchVersion);
+
+        if (flavor == "cu121")
+        {
+            args.Add("--index-url");
+            args.Add(!string.IsNullOrWhiteSpace(_settings.TorchIndexUrl)
+                ? _settings.TorchIndexUrl.Trim()
+                : "https://download.pytorch.org/whl/cu121");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_settings.PipIndexUrl))
+        {
+            args.Add("--extra-index-url");
+            args.Add(_settings.PipIndexUrl.Trim());
+        }
+
+        args.AddRange(PipNetworkArgs(includeIndex: false));
+        args.AddRange(ConstraintArgs(flavor));
+
+        progress.Report(new InstallProgress("torch",
+            "Установка torch " + TorchVersion + " (" + flavor + ")...", 10));
+
+        await RunPipWithRepairAsync(args, progress, "torch", 10, 90, ct);
+
+        // После экскурсии в DirectML в окружении часто остаётся numpy 2.x, из-за которого
+        // faiss и numba перестают импортироваться. Ставим его отдельным вызовом:
+        // индекс PyTorch пакеты numpy не раздаёт.
+        var numpyArgs = new List<string>
+        {
+            "-m", "pip", "install", "--no-warn-script-location", "--no-cache-dir",
+            "--force-reinstall", "--no-deps", NumpyConstraint,
+        };
+        numpyArgs.AddRange(PipProgressArgs());
+        numpyArgs.AddRange(PipNetworkArgs());
+
+        progress.Report(new InstallProgress("torch", "Возвращаю совместимую версию numpy...", 92));
+        await RunPipWithRepairAsync(numpyArgs, progress, "numpy", 92, 96, ct);
+
+        UpdateStampFlavor(flavor);
+
+        var info = await TorchInfoAsync(ct);
+        Log.Info("Installer", "torch возвращён к сборке " + flavor + ": " + info);
+        progress.Report(new InstallProgress("torch", "Готово: " + info, 100));
+    }
+
+    /// <summary>Выбор сборки без учёта настроек: только по железу (cu121 или cpu).</summary>
+    private string ResolveTorchFlavorWithoutDirectMl()
+    {
+        if (!HasNvidiaGpu()) return "cpu";
+
+        var driver = NvidiaDriverMajor();
+        return driver > 0 && driver < MinCudaDriverMajor ? "cpu" : "cu121";
     }
 
     private async Task EnsureBackendAsync(IProgress<InstallProgress> progress, CancellationToken ct)
@@ -939,11 +1280,11 @@ public sealed class RuntimeInstaller
             EmbeddedResources.ExtractTo("backend.zip", zip);
 
             if (!IsUsableZip(zip))
-                throw new InvalidOperationException("Встроенный архив исходников RVC повреждён. Переустановите программу.");
+                throw new InvalidOperationException("Встроенный архив исходников RVC повреждён. Переустанов��те про��рамму.");
 
-            Log.Info("Installer", "Исходники RVC извлечены из самой программы");
+            Log.Info("Installer", "Исходники RVC извлечены из самой программ��");
 
-            progress.Report(new InstallProgress("Бэкенд", "Распаковка бэкенда...", 78));
+            progress.Report(new InstallProgress("Бэк����нд", "Распаковка бэкенда...", 78));
             var tempDir = Path.Combine(AppPaths.Temp, "backend-extract");
             if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
             ZipFile.ExtractToDirectory(zip, tempDir);
@@ -1024,6 +1365,35 @@ public sealed class RuntimeInstaller
 
         RegisterBackendInPth();
         progress.Report(new InstallProgress("Бэкенд", "Бэкенд готов", 80));
+    }
+
+    /// <summary>
+    /// Обновляет скрипт воркера на диске при КАЖДОМ запуске программы.
+    /// Раньше vc_worker.py перезаписывался только внутри установки, а она целиком
+    /// пропускается, когда окружение уже стоит. Из-за этого после обновления программы
+    /// в рантайме мог оставаться старый воркер, и исправления в нём не доезжали до дела.
+    /// </summary>
+    public static bool EnsureWorkerScriptCurrent()
+    {
+        try
+        {
+            if (!Directory.Exists(AppPaths.Backend)) return false;
+
+            var embedded = EmbeddedResources.Read("vc_worker.py");
+
+            if (File.Exists(AppPaths.WorkerScript) &&
+                string.Equals(File.ReadAllText(AppPaths.WorkerScript), embedded, StringComparison.Ordinal))
+                return false;
+
+            File.WriteAllText(AppPaths.WorkerScript, embedded, new UTF8Encoding(false));
+            Log.Info("Installer", "Скрипт воркера обновлён из программы: " + AppPaths.WorkerScript);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("Installer", "Не удалось обновить скрипт воркера: " + ex.Message);
+            return false;
+        }
     }
 
     private static string BackendStampFile => Path.Combine(AppPaths.Backend, ".backend-stamp");
@@ -1154,14 +1524,14 @@ public sealed class RuntimeInstaller
                 if (downloadedSize < minBytes)
                     throw new IOException(
                         $"{name} скачался подозрительно маленьким ({downloadedSize} байт, ожидалось не менее {minBytes}). " +
-                        "Похоже на страницу-заглушку от провайдера или прокси.");
+                        "Похоже на страницу-заглушку от пр��вайдера или прокси.");
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 if (optional)
                 {
                     // Необязательный файл — установку из-за него не рвём, но говорим о последствиях явно.
-                    Log.Warn("Installer", "Необязательный файл пропущен (" + name + "): " + ex.Message +
+                    Log.Warn("Installer", "Необязательный фай�� пропущен (" + name + "): " + ex.Message +
                         (name.StartsWith("fcpe") ? " — алгоритм f0=fcpe будет недоступен, останется rmvpe" : ""));
                     progress.Report(new InstallProgress("Модели",
                         name + ": пропущен (необязательный)" +
@@ -1228,8 +1598,8 @@ public sealed class RuntimeInstaller
         foreach (var m in missing) text.AppendLine("  • " + m);
 
         text.AppendLine();
-        text.AppendLine("Можно положить их руками — скачивание тогда будет пропущено.");
-        text.AppendLine("Папка для файлов (имена менять нельзя):");
+        text.AppendLine("Можно положить их руками — ска��ивание то��да будет пропущено.");
+        text.AppendLine("Папка для файлов (имена менят�� нельзя):");
         text.AppendLine("  " + folder);
         text.AppendLine();
         text.AppendLine("Страница с файлами: " + HfEndpoint + "/" + WeightsRepo + "/tree/main/Resources");
@@ -1270,6 +1640,344 @@ public sealed class RuntimeInstaller
         return module;
     }
 
+    /// <summary>
+    /// Пакеты, которые автодоустановка трогать не имеет права: их версии подобраны
+    /// вручную (torch под CUDA, numpy 1.x под faiss и numba). Одна такая автодоставка
+    /// (torch_directml на NVIDIA-машине) заменила CUDA-сборку torch на 2.4.1+cpu и
+    /// подняла numpy до 2.x — окружение перестало запускаться вообще.
+    /// </summary>
+    private static readonly string[] ProtectedPackages =
+    {
+        "torch", "torchaudio", "torchvision", "torch-directml", "numpy",
+    };
+
+    /// <summary>Границы numpy: faiss, numba и torchaudio собраны под 1.x и падают на 2.x.</summary>
+    private const string NumpyConstraint = "numpy>=1.26.4,<2.0";
+
+    /// <summary>Сравнивает имя пакета с защитным списком, игнорируя версии и дефисы.</summary>
+    private static bool IsProtectedPackage(string package)
+    {
+        if (string.IsNullOrWhiteSpace(package)) return false;
+
+        var name = package.Trim().Replace('_', '-');
+        var cut = name.IndexOfAny(new[] { '=', '<', '>', '!', '~', '[', ';', ' ' });
+        if (cut > 0) name = name[..cut];
+
+        foreach (var protectedName in ProtectedPackages)
+        {
+            if (string.Equals(protectedName.Replace('_', '-'), name, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Файл ограничений для pip: что бы мы ни доустанавливали, numpy остаётся 1.x,
+    /// а пара torch/torchaudio — той версии, под которую собрано окружение.
+    /// Без numpy-границы любая случайная зависимость поднимает numpy до 2.x и ломает ABI.
+    /// Без пинов torch происходит худшее: torchcrepe и torchfcpe требуют torch и
+    /// torchaudio без версий, а установленный torchaudio с локальной версией (+cu121)
+    /// для pip выглядит недостижимым — он начинает перебирать версии и ставит
+    /// свежайшую пару с PyPI, которая в нашем Python вообще не грузится.
+    /// </summary>
+    private static List<string> ConstraintArgs(string? torchFlavor = null)
+    {
+        try
+        {
+            Directory.CreateDirectory(AppPaths.Runtime);
+            var file = Path.Combine(AppPaths.Runtime, "pip-constraints.txt");
+
+            var lines = new List<string> { NumpyConstraint };
+
+            if (torchFlavor != null)
+            {
+                // Ограничение без локальной части («==2.5.1») подходит и сборке 2.5.1+cu121:
+                // pip считает её удовлетворяющей, поэтому CUDA-сборка остаётся на месте.
+                var torchVersion = torchFlavor == "dml" ? TorchVersionDirectMl : TorchVersion;
+                lines.Add("torch==" + torchVersion);
+                lines.Add("torchaudio==" + torchVersion);
+            }
+
+            File.WriteAllText(file, string.Join(Environment.NewLine, lines) + Environment.NewLine, new UTF8Encoding(false));
+            return new List<string> { "-c", file };
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("Installer", "Не удалось записать файл ограничений pip: " + ex.Message);
+            return new List<string>();
+        }
+    }
+
+    /// <summary>Признаки того, что numpy подняли до 2.x и нативные пакеты сломались.</summary>
+    private static bool NeedsNumpyRepair(string output)
+    {
+        if (string.IsNullOrEmpty(output)) return false;
+
+        return output.Contains("Numba needs NumPy", StringComparison.OrdinalIgnoreCase)
+            || output.Contains("numpy.core.multiarray failed to import", StringComparison.OrdinalIgnoreCase)
+            || output.Contains("_ARRAY_API not found", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Ожидаемая версия torch для сборки: у ветки DirectML она своя.</summary>
+    private static string TorchVersionFor(string? torchFlavor)
+        => torchFlavor == "dml" ? TorchVersionDirectMl : TorchVersion;
+
+    /// <summary>
+    /// Какая версия пакета реально лежит в site-packages. Читаем имя папки *.dist-info и
+    /// не запускаем Python: проверка должна быть мгновенной, её вызывают при старте программы.
+    /// Пустая строка — пакета нет, "?" — записей несколько (окружение смешано).
+    /// </summary>
+    private static string InstalledPackageVersion(string package)
+    {
+        try
+        {
+            if (!Directory.Exists(SitePackages)) return "";
+
+            var found = new List<string>();
+            var patterns = new[] { package + "-*.dist-info", package.Replace('-', '_') + "-*.dist-info" };
+
+            foreach (var pattern in patterns)
+            {
+                foreach (var dir in Directory.GetDirectories(SitePackages, pattern))
+                {
+                    var name = Path.GetFileName(dir);
+                    var dash = name.IndexOf('-');
+                    var tail = name.LastIndexOf(".dist-info", StringComparison.OrdinalIgnoreCase);
+                    if (dash < 0 || tail <= dash) continue;
+
+                    var version = name[(dash + 1)..tail];
+                    if (!found.Contains(version)) found.Add(version);
+                }
+            }
+
+            if (found.Count == 0) return "";
+            return found.Count == 1 ? found[0] : "?";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    /// <summary>
+    /// Быстрая проверка, что в окружении лежит именно наша пара torch/torchaudio. Нужна на
+    /// старте: сорванная установка успевала обновить отпечаток бэкенда, штамп оставался
+    /// годным, и программа запускалась с неработающим torch — без шанса вылечиться сама.
+    /// </summary>
+    private static bool TorchLooksSane(string? torchFlavor)
+    {
+        var expected = TorchVersionFor(torchFlavor);
+
+        foreach (var package in new[] { "torch", "torchaudio" })
+        {
+            var installed = InstalledPackageVersion(package);
+
+            // Пакета не видно — это забота обычной установки, а не этой проверки.
+            if (installed.Length == 0) continue;
+
+            if (installed == "?" || !installed.StartsWith(expected, StringComparison.Ordinal))
+            {
+                Log.Warn("Installer", "В окружении " + package + " версии " + installed
+                    + ", а нужна " + expected + " — окружение считается неустановленным");
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Стирает штамп установки: следующий запуск программы пройдёт через установщик.</summary>
+    public static void InvalidateInstallStamp(string reason)
+    {
+        try
+        {
+            if (!File.Exists(AppPaths.InstallStampFile)) return;
+
+            File.Delete(AppPaths.InstallStampFile);
+            Log.Warn("Installer", "Штамп установки сброшен (" + reason + ")");
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("Installer", "Не удалось сбросить штамп установки: " + ex.Message);
+        }
+    }
+
+    /// <summary>Похоже ли сообщение на несовместимые нативные библиотеки torch (WinError 127 и родня).</summary>
+    public static bool LooksLikeBrokenNativeLibrary(string message) => NeedsTorchRepair(message);
+
+    /// <summary>
+    /// Физически убирает папки torch из site-packages. pip удаляет только те файлы, которые
+    /// записаны в его RECORD, поэтому после смены версии в torch\lib остаются чужие DLL —
+    /// импорт продолжает падать с WinError 127 даже после переустановки.
+    /// </summary>
+    private static void PurgeTorchDirectories(string torchFlavor)
+    {
+        if (!Directory.Exists(SitePackages)) return;
+
+        var folders = new List<string> { "torch", "torchgen", "functorch", "torchaudio", "torio", "torchvision" };
+        if (torchFlavor != "dml") folders.Add("torch_directml");
+
+        foreach (var folder in folders)
+            TryDeleteDirectory(Path.Combine(SitePackages, folder));
+
+        foreach (var folder in folders)
+        {
+            var patterns = new[] { folder + "-*.dist-info", folder.Replace('_', '-') + "-*.dist-info" };
+
+            foreach (var pattern in patterns)
+            {
+                try
+                {
+                    foreach (var dir in Directory.GetDirectories(SitePackages, pattern))
+                        TryDeleteDirectory(dir);
+                }
+                catch (Exception ex)
+                {
+                    Log.Debug("Installer", "Не удалось перебрать " + pattern + ": " + ex.Message);
+                }
+            }
+        }
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (!Directory.Exists(path)) return;
+
+            Directory.Delete(path, true);
+            Log.Info("Installer", "Удалены остатки пакета: " + Path.GetFileName(path));
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("Installer", "Не удалось удалить " + path + ": " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Признаки того, что нативные библиотеки torch не грузятся: чаще всего в окружении
+    /// оказалась чужая версия torch (pip «согласовал» зависимости и ушёл на свежайшую
+    /// сборку с PyPI) либо torch и torchaudio разъехались по версиям.
+    /// </summary>
+    private static bool NeedsTorchRepair(string output)
+    {
+        if (string.IsNullOrEmpty(output)) return false;
+
+        string[] markers =
+        {
+            "Не найдена указанная процедура",
+            "specified procedure could not be found",
+            "DLL load failed",
+            "libtorchaudio",
+            "torch._C",
+        };
+
+        foreach (var marker in markers)
+        {
+            if (output.Contains(marker, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Провалилась ли конкретная проверка в JSON-отчёте самопроверки. Разбор по имени
+    /// проверки, а не по тексту ошибки: текст зависит от языка Windows.
+    /// </summary>
+    private static bool SelfTestCheckFailed(string output, string checkName)
+    {
+        try
+        {
+            var start = output.IndexOf('{');
+            var end = output.LastIndexOf('}');
+            if (start < 0 || end <= start) return false;
+
+            using var doc = JsonDocument.Parse(output[start..(end + 1)]);
+            if (!doc.RootElement.TryGetProperty("checks", out var checks)) return false;
+            if (checks.ValueKind != JsonValueKind.Array) return false;
+
+            foreach (var check in checks.EnumerateArray())
+            {
+                var name = check.TryGetProperty("name", out var n) ? n.GetString() : null;
+                if (!string.Equals(name, checkName, StringComparison.OrdinalIgnoreCase)) continue;
+
+                return !(check.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Debug("Installer", "Не удалось разобрать проверки самопроверки: " + ex.Message);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Переустанавливает нашу пару torch/torchaudio и убирает пакеты, которые тянут
+    /// за собой другую версию torch. Нужно, чтобы битое окружение лечилось само,
+    /// без переустановки программы вручную.
+    /// </summary>
+    private async Task RepairTorchAsync(string torchFlavor, IProgress<InstallProgress> progress, CancellationToken ct)
+    {
+        var version = torchFlavor == "dml" ? TorchVersionDirectMl : TorchVersion;
+
+        progress.Report(new InstallProgress("Проверка",
+            "Восстанавливаю рабочую сборку PyTorch (" + torchFlavor + ")...", 96));
+
+        // torchvision мы не ставим никогда — он приходит зависимостью torch-directml и
+        // требует ровно torch 2.4.1. Именно такие «жёсткие» соседи заставляют pip искать
+        // совместимую па��у и уходить на свежайший torch с PyPI.
+        var leftovers = new List<string> { "torchvision" };
+        if (torchFlavor != "dml") leftovers.Add("torch-directml");
+
+        foreach (var package in leftovers)
+        {
+            Log.Info("Installer", "Удаляю лишний пакет " + package + ": он требует другую версию torch");
+            await RunPythonCaptureAsync(new[] { "-m", "pip", "uninstall", "-y", package }, ct);
+        }
+
+        // Саму пару torch/torchaudio тоже снимаем и добиваем папки вручную: без этого
+        // остатки чужой сборки переживают --force-reinstall и импорт снова падает.
+        await RunPythonCaptureAsync(new[] { "-m", "pip", "uninstall", "-y", "torch", "torchaudio" }, ct);
+        PurgeTorchDirectories(torchFlavor);
+
+        var args = new List<string>
+        {
+            "-m", "pip", "install", "--no-warn-script-location", "--no-cache-dir", "--force-reinstall",
+        };
+        args.AddRange(PipProgressArgs());
+        args.Add("torch==" + version);
+        args.Add("torchaudio==" + version);
+
+        if (torchFlavor == "dml")
+            args.Add("torch-directml==" + TorchDirectMlVersion);
+
+        if (torchFlavor == "cu121")
+        {
+            args.Add("--index-url");
+            args.Add(!string.IsNullOrWhiteSpace(_settings.TorchIndexUrl)
+                ? _settings.TorchIndexUrl.Trim()
+                : "https://download.pytorch.org/whl/cu121");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_settings.PipIndexUrl))
+        {
+            args.Add("--extra-index-url");
+            args.Add(_settings.PipIndexUrl.Trim());
+        }
+
+        args.AddRange(PipNetworkArgs(includeIndex: false));
+        args.AddRange(ConstraintArgs(torchFlavor));
+
+        await RunPipWithRepairAsync(args, progress, "torch", 96, 97, ct);
+        UpdateStampFlavor(torchFlavor);
+
+        var info = await TorchInfoAsync(ct);
+        Log.Info("Installer", "torch переустановлен (" + torchFlavor + "): "
+            + (info.Length > 0 ? info : "импорт всё ещё не проходит"));
+    }
+
     /// <summary>Вытаскивает список missing_modules из JSON-отчёта самопроверки.</summary>
     private static List<string> ParseMissingModules(string output)
     {
@@ -1299,10 +2007,16 @@ public sealed class RuntimeInstaller
         return result;
     }
 
-    /// <summary>Финальная проверка: import torch/faiss + доступность воркера.</summary>
+    /// <summary>Финальная проверка: import torch/faiss + доступность в��ркера.</summary>
     public async Task VerifyAsync(IProgress<InstallProgress> progress, CancellationToken ct)
     {
         progress.Report(new InstallProgress("Проверка", "Проверяем установленное окружение...", 94));
+
+        // Какая сборка torch здесь считается правильной: нужно и для ограничений pip, и для
+        // самолечения. Настройка сильнее автоопределения — так же, как в ResolveTorchFlavor.
+        var torchFlavor = _settings.Device == ComputeDevice.DirectMl
+            ? "dml"
+            : ResolveTorchFlavorWithoutDirectMl();
 
         var (code, output) = await RunPythonCaptureAsync(new[] { AppPaths.WorkerScript, "--selftest" }, ct);
         Log.Info("Installer", "Самопроверка бэкенда:\n" + output.Trim());
@@ -1314,8 +2028,23 @@ public sealed class RuntimeInstaller
             var missing = ParseMissingModules(output);
             if (missing.Count > 0)
             {
-                var packages = missing.Select(MapModuleToPackage).Where(p => p != null).Select(p => p!).Distinct().ToList();
                 Log.Warn("Installer", "Не хватает модулей: " + string.Join(", ", missing));
+
+                var mapped = missing.Select(MapModuleToPackage)
+                    .Where(p => !string.IsNullOrWhiteSpace(p))
+                    .Select(p => p!)
+                    .Distinct()
+                    .ToList();
+
+                // Защитные пакеты не доставляем никогда: версии torch и numpy здесь
+                // важнее факта наличия, а pip легко собирает несовместимую комбинацию.
+                var blocked = mapped.Where(IsProtectedPackage).ToList();
+                if (blocked.Count > 0)
+                    Log.Warn("Installer",
+                        "Не доставляю автоматически (версии этих пакетов подобраны вручную): "
+                        + string.Join(", ", blocked));
+
+                var packages = mapped.Where(p => !IsProtectedPackage(p)).ToList();
 
                 if (packages.Count > 0)
                 {
@@ -1327,6 +2056,7 @@ public sealed class RuntimeInstaller
                     var args = new List<string> { "-m", "pip", "install", "--no-warn-script-location", "--no-cache-dir", "--force-reinstall" };
                     args.AddRange(PipProgressArgs());
                     args.AddRange(PipNetworkArgs());
+                    args.AddRange(ConstraintArgs(torchFlavor));
                     args.AddRange(packages);
 
                     await RunPipWithRepairAsync(args, progress, "pip", 95, 97, ct);
@@ -1335,6 +2065,41 @@ public sealed class RuntimeInstaller
                     Log.Info("Installer", "Повторная самопроверка:\n" + output.Trim());
                 }
             }
+        }
+
+        // Окружение могло остаться с numpy 2.x после любого стороннего pip install: faiss,
+        // numba и torchaudio собраны под 1.x и падают по ABI. Возвращаем версию са��и,
+        // иначе программа больше не запустится без ручного вмешательства.
+        if (code != 0 && NeedsNumpyRepair(output))
+        {
+            progress.Report(new InstallProgress("Проверка", "Возвращаю совместимую версию numpy...", 96));
+
+            var numpyArgs = new List<string>
+            {
+                "-m", "pip", "install", "--no-warn-script-location", "--no-cache-dir",
+                "--force-reinstall", "--no-deps", NumpyConstraint,
+            };
+            numpyArgs.AddRange(PipProgressArgs());
+            numpyArgs.AddRange(PipNetworkArgs());
+
+            await RunPipWithRepairAsync(numpyArgs, progress, "numpy", 96, 97, ct);
+
+            (code, output) = await RunPythonCaptureAsync(new[] { AppPaths.WorkerScript, "--selftest" }, ct);
+            Log.Info("Installer", "Самопроверка после возврата numpy:\n" + output.Trim());
+        }
+
+        // Пара torch/torchaudio могла остаться битой: pip не учитывает, что уже установленный
+        // torchaudio с локальной версией (+cu121) требует ровно такой же torch, и в попытке
+        // «согласовать» зависимости уходит на свежайшую сборку с PyPI. Она не грузится в нашем
+        // Python: OSError 127, «Не найдена указанная процедура» в каждом импорте.
+        if (code != 0 && (NeedsTorchRepair(output)
+            || SelfTestCheckFailed(output, "torch")
+            || SelfTestCheckFailed(output, "torchaudio")))
+        {
+            await RepairTorchAsync(torchFlavor, progress, ct);
+
+            (code, output) = await RunPythonCaptureAsync(new[] { AppPaths.WorkerScript, "--selftest" }, ct);
+            Log.Info("Installer", "Самопроверка после переустановки torch:\n" + output.Trim());
         }
 
         if (code != 0)
@@ -1483,7 +2248,7 @@ public sealed class RuntimeInstaller
                 psi.Environment["HTTPS_PROXY"] = proxyUrl;
                 psi.Environment["ALL_PROXY"] = proxyUrl;
 
-                // Переменные в нижнем регистре читают requests и urllib3, в верхнем — часть других либ.
+                // Перемен��ые в нижнем регистре читают requests и urllib3, в верхнем — часть других либ.
                 psi.Environment["http_proxy"] = proxyUrl;
                 psi.Environment["https_proxy"] = proxyUrl;
                 psi.Environment["all_proxy"] = proxyUrl;
@@ -1503,6 +2268,7 @@ public sealed class RuntimeInstaller
         {
             ComputeDevice.Cpu => "cpu",
             ComputeDevice.Cuda => "cuda",
+            ComputeDevice.DirectMl => "dml",
             _ => "auto"
         };
 
@@ -1798,7 +2564,7 @@ internal static class EmbeddedResources
         return reader.ReadToEnd();
     }
 
-    /// <summary>Извлекает встроенный двоичный ресурс в файл на диске.</summary>
+    /// <summary>Извлекает встроенный двоичный ресур�� в файл на диске.</summary>
     public static void ExtractTo(string fileName, string destinationPath)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);

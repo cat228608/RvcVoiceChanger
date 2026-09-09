@@ -1,11 +1,13 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Sockets;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using RvcVoiceChanger.Core;
 
@@ -20,6 +22,22 @@ public enum FrameType : byte
 }
 
 public sealed record WorkerStats(double Volume, double ProcessMs);
+
+/// <summary>
+/// Аудио-блок, ожидающий отправки. Payload — буфер из пула, он принадлежит
+/// очереди до момента записи в сокет и не переиспользуется в это время.
+/// </summary>
+readonly struct AudioSendItem
+{
+    public AudioSendItem(byte[] payload, int byteCount)
+    {
+        Payload = payload;
+        ByteCount = byteCount;
+    }
+
+    public byte[] Payload { get; }
+    public int ByteCount { get; }
+}
 
 /// <summary>
 /// Мост к python-воркеру. Воркер поднимает TCP-сервер на 127.0.0.1 и печатает
@@ -40,8 +58,39 @@ public sealed class PythonBridge : IDisposable, IAsyncDisposable
     private Task? _heartbeatTask;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
 
-    /// <summary>Буфер для отправки аудио — чтобы не аллоцировать массив на каждый блок.</summary>
-    private byte[] _audioSendBuffer = Array.Empty<byte>();
+    /// <summary>Заголовок кадра. Переиспользуется, обращение защищено _writeLock.</summary>
+    private readonly byte[] _headerBuffer = new byte[5];
+
+    /// <summary>Глубина очереди отправки. Столько же блоков держит и python-воркер.</summary>
+    private const int AudioQueueCapacity = 3;
+
+    /// <summary>Сколько байтовых буферов держим в пуле.</summary>
+    private const int MaxPooledBuffers = 8;
+
+    /// <summary>
+    /// Очередь исходящих аудио-блоков. Читает её единственный писатель
+    /// (WriteLoopAsync), поэтому порядок кадров гарантирован, а буфер блока
+    /// не может измениться между копированием и записью в сокет.
+    /// </summary>
+    private Channel<AudioSendItem>? _audioQueue;
+    private Task? _writerTask;
+
+    /// <summary>Пул буферов под аудио-кадры: блок 128 мс — это 24 КБ на каждую отправку.</summary>
+    private readonly ConcurrentQueue<byte[]> _bufferPool = new();
+    private int _pooledCount;
+
+    /// <summary>Счётчик отброшенных блоков и отметка последнего предупреждения о них.</summary>
+    private long _droppedBlocks;
+    private long _lastDropWarnTicks;
+
+    /// <summary>
+    /// Последние строки stderr воркера. Обычно они пишутся уровнем предупреждения
+    /// и пропадают из вида при фильтре «Только ошибки», а именно в них лежит настоящая
+    /// причина падения (traceback python). Когда связь рвётся, вываливаем их уровнем ошибки.
+    /// </summary>
+    private readonly ConcurrentQueue<string> _stderrTail = new();
+    private const int StderrTailLines = 30;
+    private volatile bool _stderrTailReported;
 
     /// <summary>Момент последнего ответа воркера (pong или любой кадр).</summary>
     private long _lastAliveUtcTicks;
@@ -69,6 +118,8 @@ public sealed class PythonBridge : IDisposable, IAsyncDisposable
 
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _connectionDead = false;
+        _stderrTail.Clear();
+        _stderrTailReported = false;
 
         var psi = _installer.CreatePythonStartInfo(new[] { AppPaths.WorkerScript, "--serve" });
         _process = new Process { StartInfo = psi, EnableRaisingEvents = true };
@@ -93,6 +144,7 @@ public sealed class PythonBridge : IDisposable, IAsyncDisposable
         _process.ErrorDataReceived += (_, e) =>
         {
             if (string.IsNullOrWhiteSpace(e.Data)) return;
+            RememberStderr(e.Data);
             Log.Warn("worker", e.Data);
         };
 
@@ -103,7 +155,10 @@ public sealed class PythonBridge : IDisposable, IAsyncDisposable
             try { if (sender is Process p) code = p.ExitCode; } catch { }
 
             if (code != 0)
+            {
                 Log.Error("Bridge", $"Процесс воркера завершился с кодом {code}");
+                DumpStderrTailSoon($"Воркер завершился с кодом {code}.");
+            }
             portTcs.TrySetException(new InvalidOperationException($"Воркер завершился (код {code})"));
         };
 
@@ -130,8 +185,18 @@ public sealed class PythonBridge : IDisposable, IAsyncDisposable
         _stream = _client.GetStream();
 
         MarkAlive();
+
+        // Очередь и писатель поднимаются до первого блока аудио: TrySendAudio
+        // молча отбрасывает блоки, пока _audioQueue равен null.
+        _audioQueue = Channel.CreateBounded<AudioSendItem>(new BoundedChannelOptions(AudioQueueCapacity)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+            AllowSynchronousContinuations = false
+        });
+
         _readerTask = Task.Run(() => ReadLoopAsync(_cts.Token));
         _heartbeatTask = Task.Run(() => HeartbeatLoopAsync(_cts.Token));
+        _writerTask = Task.Run(() => WriteLoopAsync(_audioQueue, _cts.Token));
 
         // Пути модели кладём в params: воркер читает конфигурацию оттуда.
         // Верхнеуровневые ключи дублируем для совместимости.
@@ -173,6 +238,24 @@ public sealed class PythonBridge : IDisposable, IAsyncDisposable
         ["cross_fade_overlap_size"] = _settings.CrossFadeOverlapSize,
         ["extra_convert_size"] = _settings.ExtraConvertSize,
         ["device"] = _settings.Device.ToString().ToLowerInvariant(),
+
+        // ---- ускорение / GPU (требуют перезагрузки движка) ----
+        ["precision"] = _settings.Precision.ToString().ToLowerInvariant(),
+        ["allow_tf32"] = _settings.AllowTf32,
+        ["torch_compile"] = _settings.TorchCompileEnabled,
+        ["torch_compile_mode"] = _settings.TorchCompileMode,
+        ["use_ring_buffer"] = _settings.UseRingBuffer,
+
+        // ---- звучание и синки (переключаются на ходу) ----
+        ["reduce_gpu_sync"] = _settings.ReduceGpuSync,
+        ["volume_gain_mode"] = _settings.VolumeGainMode == VolumeGainMode.Interpolated
+            ? "interpolated"
+            : "block_scalar",
+        ["soft_gate"] = _settings.SoftGateEnabled,
+        ["soft_gate_hangover_ms"] = _settings.SoftGateHangoverMs,
+        ["soft_gate_attack_ms"] = _settings.SoftGateAttackMs,
+        ["soft_gate_release_ms"] = _settings.SoftGateReleaseMs,
+
         ["pedalboard"] = new Dictionary<string, object?>
         {
             ["reverb"] = _settings.Reverb,
@@ -222,16 +305,124 @@ public sealed class PythonBridge : IDisposable, IAsyncDisposable
         await WriteFrameAsync(FrameType.Control, json, json.Length);
     }
 
-    public async Task SendAudioAsync(float[] samples, int count)
+    /// <summary>
+    /// Ставит блок в очередь отправки. Копирование выполняется синхронно, поэтому
+    /// вызывающий может сразу переиспользовать свой массив. Метод не блокирует
+    /// поток захвата и не бросает исключений: аудио-callback обязан вернуться
+    /// немедленно. Возвращает false, если блок отброшен.
+    /// </summary>
+    public bool TrySendAudio(float[] samples, int count)
     {
-        if (_stream == null) return;
+        var queue = _audioQueue;
+        if (queue == null || _connectionDead || count <= 0) return false;
 
         var byteCount = count * sizeof(float);
-        if (_audioSendBuffer.Length < byteCount)
-            _audioSendBuffer = new byte[byteCount];
+        var payload = RentBuffer(byteCount);
+        Buffer.BlockCopy(samples, 0, payload, 0, byteCount);
 
-        Buffer.BlockCopy(samples, 0, _audioSendBuffer, 0, byteCount);
-        await WriteFrameAsync(FrameType.AudioIn, _audioSendBuffer, byteCount);
+        var item = new AudioSendItem(payload, byteCount);
+
+        // Очередь короткая. Если писатель не успевает, выбрасываем самый старый
+        // блок: в реалтайме свежий звук важнее полноты записи.
+        while (!queue.Writer.TryWrite(item))
+        {
+            if (queue.Reader.TryRead(out var stale))
+            {
+                ReturnBuffer(stale.Payload);
+                Interlocked.Increment(ref _droppedBlocks);
+                continue;
+            }
+
+            // Канал закрыт (мост останавливается) — отправлять больше некуда.
+            ReturnBuffer(payload);
+            return false;
+        }
+
+        WarnAboutDropsIfNeeded();
+        return true;
+    }
+
+    /// <summary>
+    /// Единственный писатель аудио в сокет. Существует ровно для того, чтобы
+    /// исключить гонку: раньше блоки уходили через fire-and-forget и могли как
+    /// перезаписать общий буфер, так и поменяться местами в потоке кадров.
+    /// </summary>
+    private async Task WriteLoopAsync(Channel<AudioSendItem> queue, CancellationToken ct)
+    {
+        try
+        {
+            while (await queue.Reader.WaitToReadAsync(ct))
+            {
+                while (queue.Reader.TryRead(out var item))
+                {
+                    try
+                    {
+                        await WriteFrameAsync(FrameType.AudioIn, item.Payload, item.ByteCount);
+                    }
+                    finally
+                    {
+                        ReturnBuffer(item.Payload);
+                    }
+
+                    if (_connectionDead) return;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Штатная остановка моста.
+        }
+        catch (Exception ex)
+        {
+            // Раньше такое исключение терялось в незамеченной задаче.
+            Log.Error("Bridge", "Поток отправки аудио остановлен", ex);
+            OnConnectionDead("Поток отправки аудио остановлен: " + ex.Message);
+        }
+    }
+
+    private byte[] RentBuffer(int byteCount)
+    {
+        while (_bufferPool.TryDequeue(out var buffer))
+        {
+            Interlocked.Decrement(ref _pooledCount);
+
+            // Буфер меньше нужного (сменился размер чанка) — просто отдаём сборщику.
+            if (buffer.Length >= byteCount) return buffer;
+        }
+
+        return new byte[byteCount];
+    }
+
+    private void ReturnBuffer(byte[] buffer)
+    {
+        if (Interlocked.Increment(ref _pooledCount) > MaxPooledBuffers)
+        {
+            Interlocked.Decrement(ref _pooledCount);
+            return;
+        }
+
+        _bufferPool.Enqueue(buffer);
+    }
+
+    private void DrainBufferPool()
+    {
+        while (_bufferPool.TryDequeue(out _)) { }
+        Interlocked.Exchange(ref _pooledCount, 0);
+    }
+
+    /// <summary>Предупреждение об отброшенных блоках, не чаще раза в 10 секунд.</summary>
+    private void WarnAboutDropsIfNeeded()
+    {
+        if (Interlocked.Read(ref _droppedBlocks) == 0) return;
+
+        var now = DateTime.UtcNow.Ticks;
+        var last = Interlocked.Read(ref _lastDropWarnTicks);
+        if (now - last < TimeSpan.TicksPerSecond * 10) return;
+        if (Interlocked.CompareExchange(ref _lastDropWarnTicks, now, last) != last) return;
+
+        var total = Interlocked.Exchange(ref _droppedBlocks, 0);
+        Log.Warn("Bridge", $"Отправка не успевает за захватом: отброшено блоков — {total}. " +
+            "Модель не укладывается в реальное время — увеличьте размер чанка или уменьшите доп. преобразование.");
     }
 
     private async Task WriteFrameAsync(FrameType type, byte[] payload, int count)
@@ -239,14 +430,14 @@ public sealed class PythonBridge : IDisposable, IAsyncDisposable
         var stream = _stream;
         if (stream == null || _connectionDead) return;
 
-        var header = new byte[5];
-        header[0] = (byte)type;
-        BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(1), count);
-
         await _writeLock.WaitAsync();
         try
         {
-            await stream.WriteAsync(header);
+            // Заголовок собираем уже под блокировкой — буфер общий для всех кадров.
+            _headerBuffer[0] = (byte)type;
+            BinaryPrimitives.WriteInt32LittleEndian(_headerBuffer.AsSpan(1), count);
+
+            await stream.WriteAsync(_headerBuffer);
             await stream.WriteAsync(payload.AsMemory(0, count));
             await stream.FlushAsync();
         }
@@ -266,7 +457,59 @@ public sealed class PythonBridge : IDisposable, IAsyncDisposable
     {
         if (_connectionDead) return;
         _connectionDead = true;
+        DumpStderrTailSoon("Связь с воркером потеряна.");
         try { WorkerEvent?.Invoke("error", message); } catch { }
+    }
+
+    /// <summary>Запоминаем строку stderr, держа в памяти только хвост из StderrTailLines строк.</summary>
+    private void RememberStderr(string line)
+    {
+        _stderrTail.Enqueue(line);
+        while (_stderrTail.Count > StderrTailLines && _stderrTail.TryDequeue(out _)) { }
+    }
+
+    /// <summary>
+    /// Вываливает хвост stderr воркера уровнем ошибки — один раз за запуск. С небольшой
+    /// задержкой: при падении мы узнаём об обрыве сокета раньше, чем дочитаем последние
+    /// строки traceback из потока ошибок.
+    /// </summary>
+    private void DumpStderrTailSoon(string reason)
+    {
+        if (_stderrTailReported) return;
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(700));
+
+            if (_stderrTailReported) return;
+            var lines = _stderrTail.ToArray();
+            if (lines.Length == 0) return;
+            _stderrTailReported = true;
+
+            Log.Error("worker", reason + " Последние строки вывода воркера:");
+            foreach (var line in lines)
+                Log.Error("worker", "    " + line);
+        });
+    }
+
+    private bool _brokenEnvironmentReported;
+
+    /// <summary>
+    /// Воркер упал на загрузке нативных библиотек torch — значит, в окружении чужая
+    /// сборка (обычно pip «согласовал» зависимости и ушёл на свежайший torch с PyPI).
+    /// Сбрасываем штамп установки: следующий запуск программы пройдёт через установщик
+    /// и вернёт рабочую пару torch/torchaudio сам — переустановка программы не нужна.
+    /// </summary>
+    private void NoteBrokenEnvironmentIfNeeded(string message)
+    {
+        if (_brokenEnvironmentReported) return;
+        if (string.IsNullOrEmpty(message)) return;
+        if (!RuntimeInstaller.LooksLikeBrokenNativeLibrary(message)) return;
+
+        _brokenEnvironmentReported = true;
+        RuntimeInstaller.InvalidateInstallStamp("воркер не смог загрузить библиотеки PyTorch");
+        Log.Error("Bridge", "Библиотеки PyTorch в окружении несовместимы (WinError 127). Перезапустите "
+            + "программу: установщик сам переставит PyTorch нужной версии.");
     }
 
     private void MarkAlive() => Interlocked.Exchange(ref _lastAliveUtcTicks, DateTime.UtcNow.Ticks);
@@ -381,6 +624,7 @@ public sealed class PythonBridge : IDisposable, IAsyncDisposable
                     return;
                 case "error":
                     Log.Error("worker", message);
+                    NoteBrokenEnvironmentIfNeeded(message);
                     break;
                 case "warn":
                     Log.Warn("worker", message);
@@ -421,6 +665,10 @@ public sealed class PythonBridge : IDisposable, IAsyncDisposable
         }
         catch { }
 
+        // Закрываем очередь до отмены токена: писатель успеет дослать то,
+        // что уже поставлено в очередь, и выйдет из цикла сам.
+        try { _audioQueue?.Writer.TryComplete(); } catch { }
+
         try { _cts?.Cancel(); } catch { }
 
         try
@@ -428,6 +676,7 @@ public sealed class PythonBridge : IDisposable, IAsyncDisposable
             var pending = new List<Task>();
             if (_readerTask != null) pending.Add(_readerTask);
             if (_heartbeatTask != null) pending.Add(_heartbeatTask);
+            if (_writerTask != null) pending.Add(_writerTask);
             if (pending.Count > 0)
                 await Task.WhenAny(Task.WhenAll(pending), Task.Delay(1000));
         }
@@ -439,6 +688,9 @@ public sealed class PythonBridge : IDisposable, IAsyncDisposable
         _client = null;
         _readerTask = null;
         _heartbeatTask = null;
+        _writerTask = null;
+        _audioQueue = null;
+        DrainBufferPool();
 
         try
         {

@@ -45,6 +45,23 @@ public static class AppSettingsDefaults
         s.CompressorThresholdDb = -20;
         s.CompressorRatio = 4;
 
+        // Ускорение / GPU: по-умолчанию только безопасные вещи.
+        // fp16/bf16 и torch.compile — оптимизации под конкретную карту,
+        // их включает пользователь вручную.
+        s.Precision = ComputePrecision.Fp32;
+        s.AllowTf32 = true;
+        s.TorchCompileEnabled = false;
+        s.TorchCompileMode = "reduce-overhead";
+        s.ReduceGpuSync = false;
+        s.UseRingBuffer = true;
+
+        // Звучание: новая архитектура по умолчанию.
+        s.VolumeGainMode = VolumeGainMode.Interpolated;
+        s.SoftGateEnabled = true;
+        s.SoftGateHangoverMs = 200;
+        s.SoftGateAttackMs = 15;
+        s.SoftGateReleaseMs = 80;
+
         Log.Info("Settings", "Настройки модели сброшены к значениям по умолчанию");
     }
 }

@@ -22,6 +22,20 @@
 
         <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
             <StackPanel>
+                <GroupBox Header="Видеокарта">
+                    <StackPanel>
+                        <TextBlock x:Name="GpuInfoText" TextWrapping="Wrap" Text="Определяю видеокарту..." />
+
+                        <CheckBox x:Name="UseDirectMl" Margin="0,10,0,0" Visibility="Collapsed"
+                                  Content="Считать на видеокарте AMD / Intel через DirectML"
+                                  ToolTip="Для DirectML ставится своя сборка PyTorch 2.4.1 — на CUDA-ветку это не влияет" />
+
+                        <TextBlock x:Name="GpuHintText" Style="{StaticResource Hint}" TextWrapping="Wrap"
+                                   Margin="0,6,0,0" Visibility="Collapsed"
+                                   Text="DirectML медленнее CUDA и всегда считает в fp32: fp16/bf16 и torch.compile там недоступны. Если отказаться, расчёт пойдёт на процессоре, а включить DirectML можно позже в настройках." />
+                    </StackPanel>
+                </GroupBox>
+
                 <GroupBox Header="Прокси (если провайдер блокирует сайты зависимостей)">
                     <StackPanel>
                         <StackPanel Orientation="Horizontal">

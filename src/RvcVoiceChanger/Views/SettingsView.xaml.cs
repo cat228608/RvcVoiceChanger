@@ -1,5 +1,7 @@
 using System;
 using System.Diagnostics;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using RvcVoiceChanger.Core;
@@ -69,6 +71,21 @@ public partial class SettingsView : UserControl
         VadEnabled.IsChecked = _settings.VadEnabled;
         ExclusiveMode.IsChecked = _settings.ExclusiveMode;
         DeviceBox.SelectedIndex = (int)_settings.Device;
+        DirectMlStatus.Text = "Состояние: установлена сборка torch — " + TorchFlavorText()
+                              + ". Нажмите «Проверить», чтобы опросить DirectML.";
+
+        PrecisionBox.SelectedIndex = (int)_settings.Precision;
+        AllowTf32.IsChecked = _settings.AllowTf32;
+        TorchCompile.IsChecked = _settings.TorchCompileEnabled;
+        SelectByContent(TorchCompileModeBox, _settings.TorchCompileMode);
+        ReduceGpuSync.IsChecked = _settings.ReduceGpuSync;
+        UseRingBuffer.IsChecked = _settings.UseRingBuffer;
+
+        VolumeGainModeBox.SelectedIndex = (int)_settings.VolumeGainMode;
+        SoftGate.IsChecked = _settings.SoftGateEnabled;
+        SoftGateHangover.Value = _settings.SoftGateHangoverMs;
+        SoftGateAttack.Value = _settings.SoftGateAttackMs;
+        SoftGateRelease.Value = _settings.SoftGateReleaseMs;
 
         ProxyModeBox.SelectedIndex = (int)_settings.ProxyMode;
         ProxyHost.Text = _settings.ProxyHost;
@@ -119,6 +136,10 @@ public partial class SettingsView : UserControl
         SetText(CrossFadeText, $"{CrossFade?.Value ?? 0:F2} с");
         SetText(ExtraConvertText, $"{ExtraConvert?.Value ?? 0:F2} с");
         SetText(SilentThresholdText, $"{SilentThreshold?.Value ?? 0:F0} дБ");
+
+        SetText(SoftGateHangoverText, $"{SoftGateHangover?.Value ?? 0:F0} мс");
+        SetText(SoftGateAttackText, $"{SoftGateAttack?.Value ?? 0:F0} мс");
+        SetText(SoftGateReleaseText, $"{SoftGateRelease?.Value ?? 0:F0} мс");
     }
 
     private void Slider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -173,6 +194,20 @@ public partial class SettingsView : UserControl
         _settings.ExclusiveMode = ExclusiveMode.IsChecked == true;
         _settings.Device = (ComputeDevice)Math.Max(0, DeviceBox.SelectedIndex);
 
+        _settings.Precision = (ComputePrecision)Math.Max(0, PrecisionBox.SelectedIndex);
+        _settings.AllowTf32 = AllowTf32.IsChecked == true;
+        _settings.TorchCompileEnabled = TorchCompile.IsChecked == true;
+        _settings.TorchCompileMode = (TorchCompileModeBox.SelectedItem as ComboBoxItem)?.Content?.ToString()
+                                     ?? "reduce-overhead";
+        _settings.ReduceGpuSync = ReduceGpuSync.IsChecked == true;
+        _settings.UseRingBuffer = UseRingBuffer.IsChecked == true;
+
+        _settings.VolumeGainMode = (VolumeGainMode)Math.Max(0, VolumeGainModeBox.SelectedIndex);
+        _settings.SoftGateEnabled = SoftGate.IsChecked == true;
+        _settings.SoftGateHangoverMs = (int)SoftGateHangover.Value;
+        _settings.SoftGateAttackMs = (int)SoftGateAttack.Value;
+        _settings.SoftGateReleaseMs = (int)SoftGateRelease.Value;
+
         _settings.ProxyMode = (ProxyMode)Math.Max(0, ProxyModeBox.SelectedIndex);
         _settings.ProxyHost = ProxyHost.Text.Trim();
         _settings.ProxyPort = int.TryParse(ProxyPort.Text.Trim(), out var port) ? port : 1080;
@@ -193,7 +228,8 @@ public partial class SettingsView : UserControl
         SaveStatus.Text = "Настройки отправлены в движок";
         Log.Info("Settings", "Настройки применены к запущенному движку");
 
-        MessageBox.Show("Часть параметров (размер чанка, кроссфейд, доп. преобразование) применяется полностью только после перезапуска (Стоп → Старт).",
+        MessageBox.Show("Сразу применяются: согласование громкости, soft-gate с его временами, синки GPU→CPU.\n\n"
+            + "Требуют перезапуска (Стоп → Старт): размер чанка, кроссфейд, доп. преобразование, тип тензоров (fp16/bf16), TF32, torch.compile и кольцевой буфер.",
             "Настройки", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
@@ -225,5 +261,111 @@ public partial class SettingsView : UserControl
     private void OpenData_Click(object sender, RoutedEventArgs e)
     {
         Process.Start(new ProcessStartInfo("explorer.exe", $"\"{AppPaths.Root}\"") { UseShellExecute = true });
+    }
+
+    // ---- DirectML: догрузка и возврат обычного PyTorch ------------------------------
+
+    /// <summary>Какая сборка torch сейчас лежит в рантайме — по метке установки.</summary>
+    private static string TorchFlavorText() => RuntimeInstaller.InstalledTorchFlavor() switch
+    {
+        "cu121" => "NVIDIA CUDA 12.1",
+        "dml" => "DirectML (AMD / Intel)",
+        "cpu" => "CPU",
+        _ => "неизвестна"
+    };
+
+    private async void DirectMlCheck_Click(object sender, RoutedEventArgs e)
+    {
+        DirectMlStatus.Text = "Состояние: проверяю...";
+
+        try
+        {
+            var installer = new RuntimeInstaller(_settings);
+            var status = await installer.DirectMlStatusAsync(CancellationToken.None);
+
+            DirectMlStatus.Text = "Состояние: " + status + ". Сборка torch — " + TorchFlavorText() + ".";
+        }
+        catch (Exception ex)
+        {
+            DirectMlStatus.Text = "Состояние: проверить не удалось — " + ex.Message;
+        }
+    }
+
+    private async void DirectMlInstall_Click(object sender, RoutedEventArgs e)
+    {
+        var answer = MessageBox.Show(
+            "Будет установлена сборка PyTorch 2.4.1 и torch-directml (около 2 ГБ).\n\n"
+            + "Если сейчас стоит CUDA-сборка, она будет заменена — вернуть её можно кнопкой "
+            + "«Вернуть обычный PyTorch».\n\nПродолжить?",
+            "Установка DirectML", MessageBoxButton.YesNo, MessageBoxImage.Question);
+
+        if (answer != MessageBoxResult.Yes) return;
+
+        var ok = await RunDirectMlTaskAsync((installer, progress, ct) => installer.InstallDirectMlAsync(progress, ct),
+            "Установка DirectML");
+
+        if (!ok) return;
+
+        // Без переключения режима установка ничего не изменит: движок по-прежнему пойдёт на CPU.
+        DeviceBox.SelectedIndex = (int)ComputeDevice.DirectMl;
+    }
+
+    private async void DirectMlRestore_Click(object sender, RoutedEventArgs e)
+    {
+        var answer = MessageBox.Show(
+            "Будет удалён torch-directml и возвращена обычная сборка PyTorch "
+            + "(CUDA — если есть подходящая NVIDIA, иначе CPU).\n\nПродолжить?",
+            "Возврат обычного PyTorch", MessageBoxButton.YesNo, MessageBoxImage.Question);
+
+        if (answer != MessageBoxResult.Yes) return;
+
+        var ok = await RunDirectMlTaskAsync((installer, progress, ct) => installer.RestoreDefaultTorchAsync(progress, ct),
+            "Возврат обычного PyTorch");
+
+        if (!ok) return;
+
+        DeviceBox.SelectedIndex = (int)ComputeDevice.Auto;
+    }
+
+    /// <summary>Общая обвязка для долгих операций с pip: прогресс, блокировка кнопок, отчёт.</summary>
+    private async Task<bool> RunDirectMlTaskAsync(
+        Func<RuntimeInstaller, IProgress<InstallProgress>, CancellationToken, Task> action,
+        string title)
+    {
+        DirectMlCheckButton.IsEnabled = false;
+        DirectMlInstallButton.IsEnabled = false;
+        DirectMlRestoreButton.IsEnabled = false;
+        DirectMlProgress.Visibility = Visibility.Visible;
+        DirectMlProgress.Value = 0;
+
+        var progress = new Progress<InstallProgress>(p =>
+        {
+            DirectMlProgress.Value = Math.Clamp(p.Percent, 0, 100);
+            DirectMlStatus.Text = string.IsNullOrWhiteSpace(p.Detail) ? p.Stage : p.Stage + " — " + p.Detail;
+        });
+
+        try
+        {
+            var installer = new RuntimeInstaller(_settings);
+            await action(installer, progress, CancellationToken.None);
+
+            DirectMlStatus.Text = title + " завершена. Сборка torch — " + TorchFlavorText()
+                                  + ". Нажмите Стоп → Старт, чтобы движок подхватил изменения.";
+            Log.Info("Settings", title + ": готово");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Settings", title + " не удалась", ex);
+            DirectMlStatus.Text = title + " не удалась: " + ex.Message;
+            return false;
+        }
+        finally
+        {
+            DirectMlProgress.Visibility = Visibility.Collapsed;
+            DirectMlCheckButton.IsEnabled = true;
+            DirectMlInstallButton.IsEnabled = true;
+            DirectMlRestoreButton.IsEnabled = true;
+        }
     }
 }

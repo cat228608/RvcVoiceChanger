@@ -28,6 +28,11 @@ public partial class VoiceChangerView : UserControl
     private DispatcherTimer? _pushDebounce;
     private DispatcherTimer? _saveDebounce;
 
+    // Тикает, пока движок запускается и прогревается: показываем «Инициализация... N с»,
+    // чтобы было видно, что программа не зависла, и когда уже можно говорить.
+    private DispatcherTimer? _initTimer;
+    private bool _initTimerHooked;
+
     private void SchedulePushSettings()
     {
         _pushDebounce ??= CreateDebounce(async () =>
@@ -98,19 +103,108 @@ public partial class VoiceChangerView : UserControl
         _engine.StateChanged += (state, message) => Dispatcher.BeginInvoke(new Action(() =>
         {
             StartButton.IsEnabled = state is EngineState.Stopped or EngineState.Error;
-            StopButton.IsEnabled = state is EngineState.Running or EngineState.Starting;
+            StopButton.IsEnabled = state is EngineState.Running or EngineState.Starting or EngineState.Warmup;
 
             StatusText.Text = state switch
             {
                 EngineState.Running => "Работает",
                 EngineState.Starting => "Запуск...",
+                EngineState.Warmup => "Инициализация...",
                 EngineState.Error => "Ошибка: " + message,
                 _ => "Остановлено"
             };
+
+            UpdateReadyBanner(state, message);
         }));
 
         _loading = false;
     }
+
+    /// <summary>
+    /// Нижняя плашка стадии запуска: «Инициализация... N с», пока грузится модель
+    /// и идёт прогрев ядра, затем «Можно говорить». Раньше момент готовности
+    /// приходилось ловить глазами по логам и строке обработки блока.
+    /// </summary>
+    private void UpdateReadyBanner(EngineState state, string? message)
+    {
+        if (state is EngineState.Starting or EngineState.Warmup)
+        {
+            ReadyBanner.Visibility = Visibility.Visible;
+            ReadyText.SetResourceReference(TextBlock.ForegroundProperty, "Warn");
+            ReadyProgress.SetResourceReference(ProgressBar.ForegroundProperty, "Warn");
+
+            RenderInitText();
+            StartInitTimer();
+            return;
+        }
+
+        StopInitTimer();
+
+        switch (state)
+        {
+            case EngineState.Running:
+                ReadyBanner.Visibility = Visibility.Visible;
+                ReadyText.SetResourceReference(TextBlock.ForegroundProperty, "Ok");
+                ReadyProgress.SetResourceReference(ProgressBar.ForegroundProperty, "Ok");
+                ReadyProgress.IsIndeterminate = false;
+                ReadyProgress.Value = 1;
+                ReadyText.Text = $"Можно говорить · инициализация заняла {_engine.StartupSeconds:F0} с";
+                break;
+
+            case EngineState.Error:
+                ReadyBanner.Visibility = Visibility.Visible;
+                ReadyText.SetResourceReference(TextBlock.ForegroundProperty, "Err");
+                ReadyProgress.IsIndeterminate = false;
+                ReadyProgress.Value = 0;
+                ReadyText.Text = "Не запустилось: " + (message ?? "подробности во вкладке «Логи»");
+                break;
+
+            default:
+                ReadyBanner.Visibility = Visibility.Collapsed;
+                ReadyProgress.IsIndeterminate = false;
+                ReadyProgress.Value = 0;
+                ReadyText.Text = string.Empty;
+                break;
+        }
+    }
+
+    /// <summary>Две стадии запуска видны по-разному: загрузка модели — бегущая полоса, прогрев — реальный прогресс.</summary>
+    private void RenderInitText()
+    {
+        var seconds = _engine.StartupSeconds;
+
+        if (_engine.State == EngineState.Warmup)
+        {
+            ReadyProgress.IsIndeterminate = false;
+            ReadyProgress.Value = _engine.WarmupProgress;
+            ReadyText.Text = $"Инициализация... {seconds:F0} с · прогрев модели, говорить пока не нужно";
+        }
+        else
+        {
+            ReadyProgress.IsIndeterminate = true;
+            ReadyText.Text = $"Инициализация... {seconds:F0} с · загружаю модель на устройство";
+        }
+    }
+
+    private void StartInitTimer()
+    {
+        _initTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+
+        // Обработчик подписываем ровно один раз: иначе каждый старт добавлял бы лишнюю подписку.
+        if (!_initTimerHooked)
+        {
+            _initTimerHooked = true;
+            _initTimer.Tick += (_, _) =>
+            {
+                if (_engine.State is EngineState.Starting or EngineState.Warmup) RenderInitText();
+                else StopInitTimer();
+            };
+        }
+
+        _initTimer.Start();
+    }
+
+    private void StopInitTimer() => _initTimer?.Stop();
 
     public void RefreshModels()
     {
@@ -182,7 +276,8 @@ public partial class VoiceChangerView : UserControl
         UpdateModelInfo();
         SettingsStore.Save(_settings);
 
-        if (_engine.State != EngineState.Running || ModelBox.SelectedItem is not ModelEntry entry) return;
+        if (_engine.State is not (EngineState.Running or EngineState.Warmup)
+            || ModelBox.SelectedItem is not ModelEntry entry) return;
 
         try
         {
@@ -312,14 +407,14 @@ public partial class VoiceChangerView : UserControl
 
     private async void Stop_Click(object sender, RoutedEventArgs e) => await _engine.StopAsync();
 
-    /// <summary>Режим проверки: говоришь в микрофон и сразу слышишь результат в наушниках.</summary>
+    /// <summary>Режим проверки: говоришь в микрофон �� сразу слышишь результат в наушниках.</summary>
     private async void Test_Click(object sender, RoutedEventArgs e)
     {
         MonitorEnabled.IsChecked = true;
         _settings.MonitorEnabled = true;
         Device_Changed(sender, e);
 
-        if (_engine.State == EngineState.Running)
+        if (_engine.State is EngineState.Running or EngineState.Warmup or EngineState.Starting)
         {
             await _engine.StopAsync();
         }

@@ -76,7 +76,7 @@ public partial class MainWindow : Window
         _settingsView = new SettingsView(_settings, _bridge);
         _logsView = new LogsView();
 
-        VersionText.Text = "версия 1.1 · Windows x64";
+        VersionText.Text = "версия 1.2 alpha · Windows x64";
         Host.Content = _voiceView;
         UpdateThemeButton();
 
@@ -86,6 +86,7 @@ public partial class MainWindow : Window
             {
                 EngineState.Running => "Работает",
                 EngineState.Starting => "Запуск...",
+                EngineState.Warmup => "Инициализация...",
                 EngineState.Error => "Ошибка: " + message,
                 _ => "Остановлено"
             };
@@ -96,6 +97,7 @@ public partial class MainWindow : Window
             {
                 EngineState.Running => "Ok",
                 EngineState.Starting => "Warn",
+                EngineState.Warmup => "Warn",
                 EngineState.Error => "Err",
                 _ => "Muted"
             });
@@ -105,6 +107,7 @@ public partial class MainWindow : Window
         {
             ComputeDevice.Cuda => "Вычисления: NVIDIA CUDA",
             ComputeDevice.Cpu => "Вычисления: CPU",
+            ComputeDevice.DirectMl => "Вычисления: DirectML (AMD / Intel)",
             _ => "Вычисления: автовыбор"
         };
 

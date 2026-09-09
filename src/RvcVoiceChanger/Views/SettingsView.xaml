@@ -151,8 +151,121 @@
                             <ComboBoxItem Content="Автовыбор" />
                             <ComboBoxItem Content="NVIDIA CUDA" />
                             <ComboBoxItem Content="CPU" />
+                            <!-- Порядок строго совпадает с enum ComputeDevice: новое — только в конец. -->
+                            <ComboBoxItem Content="AMD / Intel Arc (DirectML)" />
                         </ComboBox>
                     </StackPanel>
+                </StackPanel>
+            </GroupBox>
+
+            <GroupBox Header="DirectML — видеокарты AMD и Intel Arc">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap"
+                               Text="Путь для карт без CUDA. Ставится отдельная сборка PyTorch 2.4.1 и torch-directml (около 2 ГБ). На DirectML расчёт всегда идёт в fp32: fp16/bf16, torch.compile и «два синка за блок» там недоступны, а задержка выше, чем на NVIDIA. На работу CUDA-карт эта ветка никак не влияет." />
+
+                    <TextBlock x:Name="DirectMlStatus" Margin="0,8,0,0" TextWrapping="Wrap"
+                               Text="Состояние: не проверялось" />
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <Button x:Name="DirectMlCheckButton" Content="Проверить" Click="DirectMlCheck_Click" />
+                        <Button x:Name="DirectMlInstallButton" Content="Установить DirectML" Click="DirectMlInstall_Click" />
+                        <Button x:Name="DirectMlRestoreButton" Content="Вернуть обычный PyTorch" Click="DirectMlRestore_Click"
+                                ToolTip="Убирает torch-directml и возвращает сборку CUDA или CPU" />
+                    </StackPanel>
+
+                    <ProgressBar x:Name="DirectMlProgress" Height="8" Margin="0,10,0,0" Minimum="0" Maximum="100"
+                                 Foreground="{DynamicResource Accent}" Background="{DynamicResource Bg3}"
+                                 BorderThickness="0" Visibility="Collapsed" />
+                </StackPanel>
+            </GroupBox>
+
+            <GroupBox Header="Ускорение и GPU">
+                <StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Тип тензоров:" Width="250" />
+                        <ComboBox x:Name="PrecisionBox" Width="200" SelectionChanged="Any_Changed">
+                            <ComboBoxItem Content="fp32 (макс. совместимость)" />
+                            <ComboBoxItem Content="fp16 (Tensor Cores, RTX 20xx+)" />
+                            <ComboBoxItem Content="bf16 (Tensor Cores, RTX 30xx+)" />
+                            <ComboBoxItem Content="Автовыбор по карте" />
+                        </ComboBox>
+                    </StackPanel>
+                    <TextBlock Style="{StaticResource Hint}"
+                               Text="fp16/bf16 задействуют Tensor Cores и дают главный выигрыш по задержке. Если карта режим не умеет, бэкенд сам откатится на fp32. При fp16 файл .index может отключиться — смотрите журнал." />
+
+                    <CheckBox x:Name="AllowTf32" Margin="0,10,0,0"
+                              Content="TF32 в matmul/cuDNN (быстрее fp32 на RTX 30xx+, качество почти не меняется)"
+                              Checked="Any_Changed" Unchecked="Any_Changed" />
+
+                    <CheckBox x:Name="TorchCompile" Content="torch.compile / CUDA Graphs (срезает накладные запуска ядер)"
+                              Checked="Any_Changed" Unchecked="Any_Changed" />
+                    <TextBlock Style="{StaticResource Hint}"
+                               Text="Первый старт после включения занимает десятки секунд (идёт компиляция). Если компиляция сорвётся, движок навсегда вернётся к обычному режиму и запишет предупреждение." />
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Режим компиляции:" Width="250" />
+                        <ComboBox x:Name="TorchCompileModeBox" Width="200" SelectionChanged="Any_Changed">
+                            <ComboBoxItem Content="reduce-overhead" />
+                            <ComboBoxItem Content="default" />
+                            <ComboBoxItem Content="max-autotune" />
+                        </ComboBox>
+                    </StackPanel>
+                    <TextBlock Style="{StaticResource Hint}"
+                               Text="reduce-overhead — тот самый режим с CUDA Graphs, лучший для маленьких блоков. max-autotune даёт иногда больше, но компилируется гораздо дольше." />
+
+                    <CheckBox x:Name="ReduceGpuSync" Margin="0,10,0,0"
+                              Content="Один синк GPU→CPU за блок вместо двух"
+                              Checked="Any_Changed" Unchecked="Any_Changed" />
+                    <TextBlock Style="{StaticResource Hint}"
+                               Text="Громкость и VAD считаются на CPU, выход забирается через pinned-буфер. Меньше простоев конвейера; индикатор громкости становится чуть грубее." />
+
+                    <CheckBox x:Name="UseRingBuffer" Content="Кольцевой буфер с индексом (без копирования буферов на каждом блоке)"
+                              Checked="Any_Changed" Unchecked="Any_Changed" />
+                    <TextBlock Style="{StaticResource Hint}"
+                               Text="Старый путь сдвигал весь буфер и аллокировал клон на каждый буфер каждый блок. Отключать только для сравнения со старым поведением." />
+                </StackPanel>
+            </GroupBox>
+
+            <GroupBox Header="Звучание: огибающая и гейт">
+                <StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Согласование громкости:" Width="250" />
+                        <ComboBox x:Name="VolumeGainModeBox" Width="260" SelectionChanged="Any_Changed">
+                            <ComboBoxItem Content="Ступенчатый скаляр (старый код)" />
+                            <ComboBoxItem Content="Интерполированная огибающая" />
+                        </ComboBox>
+                    </StackPanel>
+                    <TextBlock Style="{StaticResource Hint}"
+                               Text="Старый код умножал блок на один скаляр RMS: при блоке 128 мс это амплитудная модуляция ~7.8 Гц — слышимое дрожание/тремоло. Интерполированная огибающая ведёт громкость рампом внутри блока." />
+
+                    <CheckBox x:Name="SoftGate" Margin="0,10,0,0"
+                              Content="Soft-gate вместо жёстких нулей (новая архитектура)"
+                              Checked="Any_Changed" Unchecked="Any_Changed" />
+                    <TextBlock Style="{StaticResource Hint}"
+                               Text="Убирает щелчки и «пампинг» на входе/выходе из речи: гейт ведётся рампом, sola-буфер затухает окном, а буфер контекста обновляется и в тишине (меньше «жёваного» первого слога)." />
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Удержание гейта (hangover):" Width="250" />
+                        <Slider x:Name="SoftGateHangover" Width="300" Minimum="0" Maximum="500" TickFrequency="10"
+                                IsSnapToTickEnabled="True" ValueChanged="Slider_Changed" />
+                        <TextBlock x:Name="SoftGateHangoverText" Width="80" Margin="12,0,0,0" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Время открытия (attack):" Width="250" />
+                        <Slider x:Name="SoftGateAttack" Width="300" Minimum="1" Maximum="150" TickFrequency="1"
+                                IsSnapToTickEnabled="True" ValueChanged="Slider_Changed" />
+                        <TextBlock x:Name="SoftGateAttackText" Width="80" Margin="12,0,0,0" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="Время закрытия (release):" Width="250" />
+                        <Slider x:Name="SoftGateRelease" Width="300" Minimum="1" Maximum="500" TickFrequency="1"
+                                IsSnapToTickEnabled="True" ValueChanged="Slider_Changed" />
+                        <TextBlock x:Name="SoftGateReleaseText" Width="80" Margin="12,0,0,0" />
+                    </StackPanel>
+                    <TextBlock Style="{StaticResource Hint}"
+                               Text="Рекомендую hangover 150-300 мс, attack 10-20 мс, release 60-120 мс. При выключенном soft-gate эти три ползунка не работают." />
                 </StackPanel>
             </GroupBox>
 

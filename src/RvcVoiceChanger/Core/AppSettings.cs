@@ -11,7 +11,18 @@ namespace RvcVoiceChanger.Core;
 
 public enum ProxyMode { None, Http, Socks5 }
 
-public enum ComputeDevice { Auto, Cuda, Cpu }
+/// <summary>
+/// Где считать модель. Cuda — NVIDIA (основной, самый быстрый путь), DirectMl — AMD
+/// и Intel Arc через torch-directml. Новые значения добавляются ТОЛЬКО в конец:
+/// в settings.json лежит имя элемента, а в UI используется его индекс.
+/// </summary>
+public enum ComputeDevice { Auto, Cuda, Cpu, DirectMl }
+
+/// <summary>Тип тензоров на GPU. Fp16/Bf16 задействуют Tensor Cores (RTX 20xx+).</summary>
+public enum ComputePrecision { Fp32, Fp16, Bf16, Auto }
+
+/// <summary>Способ согласования громкости выхода с громкостью входа.</summary>
+public enum VolumeGainMode { BlockScalar, Interpolated }
 
 /// <summary>
 /// Все настройки программы. Сериализуются в settings.json.
@@ -193,6 +204,7 @@ public sealed class AppSettings : INotifyPropertyChanged
     private bool _usePhaseVocoder = true;
     private bool _vadEnabled = true;
     private ComputeDevice _device = ComputeDevice.Auto;
+    private bool _directMlPrompted;
 
     /// <summary>Питч в полутонах (f0_up_key), -24..24.</summary>
     public int Pitch { get => _pitch; set => Set(ref _pitch, value); }
@@ -220,6 +232,60 @@ public sealed class AppSettings : INotifyPropertyChanged
     public bool UsePhaseVocoder { get => _usePhaseVocoder; set => Set(ref _usePhaseVocoder, value); }
     public bool VadEnabled { get => _vadEnabled; set => Set(ref _vadEnabled, value); }
     public ComputeDevice Device { get => _device; set => Set(ref _device, value); }
+
+    /// <summary>
+    /// Спрашивали ли уже про DirectML при первом запуске. Нужен, чтобы не задавать
+    /// один и тот же вопрос каждый раз: отказ пользователя запоминается.
+    /// </summary>
+    public bool DirectMlPrompted { get => _directMlPrompted; set => Set(ref _directMlPrompted, value); }
+
+    // ---------- Ускорение / GPU ----------
+    private ComputePrecision _precision = ComputePrecision.Fp32;
+    private bool _allowTf32 = true;
+    private bool _torchCompileEnabled;
+    private string _torchCompileMode = "reduce-overhead";
+    private bool _reduceGpuSync;
+    private bool _useRingBuffer = true;
+
+    /// <summary>Fp16/Bf16 задействуют Tensor Cores. Недоступные режимы бэкенд сам откатит на fp32.</summary>
+    public ComputePrecision Precision { get => _precision; set => Set(ref _precision, value); }
+
+    /// <summary>TF32 в matmul/cuDNN: ускоряет fp32-режим на Ampere+ практически без потерь.</summary>
+    public bool AllowTf32 { get => _allowTf32; set => Set(ref _allowTf32, value); }
+
+    /// <summary>torch.compile: срезает накла��ные запуска ядер. Первый старт — десятки секунд.</summary>
+    public bool TorchCompileEnabled { get => _torchCompileEnabled; set => Set(ref _torchCompileEnabled, value); }
+
+    /// <summary>reduce-overhead включает CUDA Graphs; default — без графов; max-autotune — дольше компиляция.</summary>
+    public string TorchCompileMode { get => _torchCompileMode; set => Set(ref _torchCompileMode, value); }
+
+    /// <summary>Один синк GPU-&gt;CPU за блок вместо двух-трёх: RMS и VAD считаются на CPU.</summary>
+    public bool ReduceGpuSync { get => _reduceGpuSync; set => Set(ref _reduceGpuSync, value); }
+
+    /// <summary>Настоящее кольцо с индексом вместо сдвига буфера с клоном на каждом блоке.</summary>
+    public bool UseRingBuffer { get => _useRingBuffer; set => Set(ref _useRingBuffer, value); }
+
+    // ---------- Звучание: огибающая и soft-gate ----------
+    private VolumeGainMode _volumeGainMode = VolumeGainMode.Interpolated;
+    private bool _softGateEnabled = true;
+    private int _softGateHangoverMs = 200;
+    private int _softGateAttackMs = 15;
+    private int _softGateReleaseMs = 80;
+
+    /// <summary>Interpolated — линейный рамп громкости по блоку; BlockScalar — старый ступенчатый код (АМ ~7.8 Гц).</summary>
+    public VolumeGainMode VolumeGainMode { get => _volumeGainMode; set => Set(ref _volumeGainMode, value); }
+
+    /// <summary>Soft-gate вместо жёстких нулей: убирает щелчки на входе/выходе из речи.</summary>
+    public bool SoftGateEnabled { get => _softGateEnabled; set => Set(ref _softGateEnabled, value); }
+
+    /// <summary>Удержание гейта открытым после пропадания речи, мс (150-300).</summary>
+    public int SoftGateHangoverMs { get => _softGateHangoverMs; set => Set(ref _softGateHangoverMs, value); }
+
+    /// <summary>Время открытия гейта, мс.</summary>
+    public int SoftGateAttackMs { get => _softGateAttackMs; set => Set(ref _softGateAttackMs, value); }
+
+    /// <summary>Время закрытия гейта, мс.</summary>
+    public int SoftGateReleaseMs { get => _softGateReleaseMs; set => Set(ref _softGateReleaseMs, value); }
 
     // ---------- Буферизация / задержка ----------
     private int _readChunkSize = 48;
@@ -336,6 +402,18 @@ public static class SettingsStore
             if (settings.CrossFadeOverlapSize >= 0.10) settings.CrossFadeOverlapSize = 0.05;
             if (settings.ExtraConvertSize > 0.5) settings.ExtraConvertSize = 0.5;
             settings.SettingsVersion = 2;
+        }
+
+        if (settings.SettingsVersion < 3)
+        {
+            // Новые параметры ускорения и звучания. Безопасные вещи (кольцевой
+            // буфер, интерполированная огибающая, soft-gate) включаем сразу.
+            // fp16/bf16 и torch.compile остаются выключенными: их нужно
+            // включать осознанно и проверять на своёй карте.
+            settings.UseRingBuffer = true;
+            settings.VolumeGainMode = VolumeGainMode.Interpolated;
+            settings.SoftGateEnabled = true;
+            settings.SettingsVersion = 3;
         }
     }
 

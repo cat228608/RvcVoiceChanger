@@ -23,6 +23,9 @@ public partial class BootstrapWindow : Window
 
     public bool InstallSucceeded { get; private set; }
 
+    /// <summary>Что нашёл детектор видеокарт: нужно и для подсказки, и для вопроса про DirectML.</summary>
+    private GpuRecommendation? _gpu;
+
     public BootstrapWindow(AppSettings settings)
     {
         InitializeComponent();
@@ -39,6 +42,11 @@ public partial class BootstrapWindow : Window
 
         LogPathText.Text = _installLogFile;
 
+        DescribeGpu();
+
+        // Вопрос задаём уже после появления окна, иначе диалог всплывёт раньше самого окна.
+        Loaded += (_, _) => AskAboutDirectMlIfNeeded();
+
         // На этом этапе вкладки «Логи» ещё нет, поэтому тянем весь общий журнал сюда.
         Log.Written += OnLogWritten;
         Closed += (_, _) => Log.Written -= OnLogWritten;
@@ -54,6 +62,72 @@ public partial class BootstrapWindow : Window
 
         Dispatcher.BeginInvoke(new Action(() =>
             AppendRaw($"[{entry.Time:HH:mm:ss}] {entry.Level.ToString().ToUpperInvariant()} {entry.Source}: {entry.Message}")));
+    }
+
+    /// <summary>Показывает найденные видеокарты и, если пригодной NVIDIA нет, предлагает DirectML.</summary>
+    private void DescribeGpu()
+    {
+        try
+        {
+            // NvidiaUsable() — тот же самый критерий, по которому установщик выбирает cu121.
+            // Если он говорит "да", мы вообще ничего не спрашиваем и идём привычным путём CUDA.
+            _gpu = GpuInspector.Recommend(RuntimeInstaller.NvidiaUsable());
+            GpuInfoText.Text = _gpu.Summary;
+
+            if (_gpu.AskUser)
+            {
+                UseDirectMl.Visibility = Visibility.Visible;
+                GpuHintText.Visibility = Visibility.Visible;
+                UseDirectMl.IsChecked = _settings.Device == ComputeDevice.DirectMl;
+            }
+        }
+        catch (Exception ex)
+        {
+            // Детектор видеокарт — вещь вспомогательная, из-за неё установку не рвём.
+            GpuInfoText.Text = "Не удалось определить видеокарту — установка пойдёт обычным путём.";
+            Append("Не удалось определить видеокарту: " + ex.Message);
+        }
+    }
+
+    /// <summary>Один раз спрашивает про DirectML, если подходящей NVIDIA не нашлось.</summary>
+    private void AskAboutDirectMlIfNeeded()
+    {
+        if (_gpu is not { AskUser: true }) return;
+        if (_settings.DirectMlPrompted) return;
+
+        var name = _gpu.Adapter?.Describe() ?? "видеокарта AMD / Intel";
+
+        var answer = MessageBox.Show(this,
+            "Видеокарта NVIDIA с поддержкой CUDA не найдена, зато найдена: " + name + ".\n\n"
+            + "Такие карты умеет считать DirectML: вместо обычного PyTorch будет установлена сборка 2.4.1 "
+            + "и torch-directml (около 2 ГБ). Это медленнее CUDA, но заметно быстрее процессора.\n\n"
+            + "Включить DirectML? Если откажетесь, программа установится в режиме процессора, а включить "
+            + "DirectML можно будет позже в настройках.",
+            "Найдена видеокарта AMD / Intel", MessageBoxButton.YesNo, MessageBoxImage.Question);
+
+        var useDml = answer == MessageBoxResult.Yes;
+
+        UseDirectMl.IsChecked = useDml;
+        _settings.Device = useDml ? ComputeDevice.DirectMl : ComputeDevice.Cpu;
+        _settings.DirectMlPrompted = true;
+        SettingsStore.Save(_settings);
+
+        Append(useDml
+            ? "Выбран DirectML: будет установлена сборка PyTorch 2.4.1 с torch-directml"
+            : "DirectML отклонён: установка пойдёт в режиме процессора");
+    }
+
+    /// <summary>Переносит выбор по DirectML в настройки. Если есть рабочая NVIDIA — ничего не меняет.</summary>
+    private void ApplyDeviceToSettings()
+    {
+        // Когда карта NVIDIA пригодна, чекбокс скрыт и режим из настроек (Auto/Cuda) остаётся как был.
+        if (UseDirectMl.Visibility != Visibility.Visible) return;
+
+        var wanted = UseDirectMl.IsChecked == true ? ComputeDevice.DirectMl : ComputeDevice.Cpu;
+        if (_settings.Device == wanted) return;
+
+        _settings.Device = wanted;
+        Append("Режим вычислений: " + (wanted == ComputeDevice.DirectMl ? "DirectML (AMD / Intel)" : "процессор"));
     }
 
     private void ProxyMode_Changed(object sender, RoutedEventArgs e)
@@ -99,6 +173,7 @@ public partial class BootstrapWindow : Window
 
     private async void Start_Click(object sender, RoutedEventArgs e)
     {
+        ApplyDeviceToSettings();
         ApplyProxyToSettings();
 
         StartButton.IsEnabled = false;
